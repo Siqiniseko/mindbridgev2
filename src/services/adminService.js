@@ -5,6 +5,8 @@ import { appendDemoAudit, demoGenerateId, loadDemoDb, saveDemoDb } from '../lib/
 
 export const SMALL_CELL_THRESHOLD = 3
 
+const ALL_ROLES = ['individual', 'professional', 'primary_care', 'coordinator', 'admin', 'analyst']
+
 async function countRows(table, column, value) {
   let query = supabase.from(table).select('*', { count: 'exact', head: true })
   if (column) query = query.eq(column, value)
@@ -14,25 +16,24 @@ async function countRows(table, column, value) {
 }
 
 export async function getAdminMetrics() {
-  const roles = ['individual', 'professional', 'primary_care', 'coordinator', 'admin', 'analyst']
   const statuses = Object.keys(STATUS)
   if (!supabase) {
     const db = loadDemoDb()
     return {
-      users: Object.fromEntries(roles.map(role => [role, db.users.filter(u => u.role === role).length])),
+      users: Object.fromEntries(ALL_ROLES.map(role => [role, db.users.filter(u => u.role === role).length])),
       assessments: db.assessments.length,
       referrals: Object.fromEntries(statuses.map(status => [status, db.referrals.filter(r => r.status === status).length])),
       followUps: db.follow_ups.length,
     }
   }
   const [users, assessments, referrals, followUps] = await Promise.all([
-    Promise.all(['individual', 'professional', 'admin'].map(role => countRows('profiles', 'role', role))),
+    Promise.all(ALL_ROLES.map(role => countRows('profiles', 'role', role))),
     countRows('assessments'),
     Promise.all(statuses.map(status => countRows('referrals', 'status', status))),
     countRows('follow_ups'),
   ])
   return {
-    users: { individual: users[0], professional: users[1], admin: users[2] },
+    users: Object.fromEntries(ALL_ROLES.map((role, index) => [role, users[index]])),
     assessments,
     referrals: Object.fromEntries(statuses.map((status, index) => [status, referrals[index]])),
     followUps,
@@ -44,14 +45,13 @@ export async function listUsersAndRoles() {
     const db = loadDemoDb()
     return db.users.map(u => ({ id: u.id, full_name: u.full_name, email: u.email, role: u.role, created_at: u.created_at }))
   }
-  const { data, error } = await supabase.from('profiles').select('id, full_name, role, created_at').order('created_at', { ascending: false })
+  const { data, error } = await supabase.from('profiles').select('id, email, full_name, role, created_at').order('created_at', { ascending: false })
   if (error) throw error
   return data
 }
 
 export async function updateUserRole(targetUserId, newRole, actorId) {
-  const valid = ['individual', 'professional', 'primary_care', 'coordinator', 'admin', 'analyst']
-  if (!valid.includes(newRole)) throw new Error('Choose a valid role.')
+  if (!ALL_ROLES.includes(newRole)) throw new Error('Choose a valid role.')
   if (!supabase) {
     const db = loadDemoDb()
     const user = db.users.find(u => u.id === targetUserId)
@@ -99,18 +99,18 @@ export async function listAdminReferrals() {
   }
   const { data, error } = await supabase
     .from('referrals')
-    .select('id, user_id, status, created_at, service:support_services(name), user:profiles!referrals_user_id_fkey(full_name)')
+    .select('id, user_id, status, priority, crisis_flagged, created_at, service:support_services(name), user:profiles!referrals_user_id_fkey(full_name)')
     .order('created_at', { ascending: false })
   if (error) throw error
   return data
 }
 
 export async function acceptAdminReferral(id) {
+  const now = new Date().toISOString()
   if (!supabase) {
     const db = loadDemoDb()
-    const referral = db.referrals.find(r => r.id === id && ['pending', 'submitted', 'received'].includes(r.status))
+    const referral = db.referrals.find(r => r.id === id && ['support_requested', 'pending', 'submitted', 'received'].includes(r.status))
     if (!referral) throw new Error('This referral is no longer waiting.')
-    const now = new Date().toISOString()
     referral.status = 'professional_review'
     if (!referral.first_response_at) referral.first_response_at = now
     referral.updated_at = now
@@ -120,13 +120,13 @@ export async function acceptAdminReferral(id) {
   }
   const { data, error } = await supabase
     .from('referrals')
-    .update({ status: 'accepted' })
+    .update({ status: 'professional_review', first_response_at: now })
     .eq('id', id)
-    .eq('status', 'pending')
+    .in('status', ['support_requested', 'pending', 'submitted', 'received'])
     .select('id')
     .maybeSingle()
   if (error) throw error
-  if (!data) throw new Error('This referral is no longer pending.')
+  if (!data) throw new Error('This referral is no longer waiting.')
 }
 
 export async function saveService(id, values) {
@@ -178,8 +178,7 @@ export async function saveService(id, values) {
     return created
   }
 
-  const supabaseFields = { name: fields.name, tier: fields.tier, description: fields.description, contact: fields.contact, website: fields.website }
-  const query = id ? supabase.from('support_services').update(supabaseFields).eq('id', id) : supabase.from('support_services').insert(supabaseFields)
+  const query = id ? supabase.from('support_services').update(fields).eq('id', id) : supabase.from('support_services').insert(fields)
   const { data, error } = await query.select().single()
   if (error) throw error
   return data
@@ -197,7 +196,9 @@ export async function setServiceFlag(id, flag, value) {
     saveDemoDb(db)
     return service
   }
-  const { data, error } = await supabase.from('support_services').update({ [flag]: value }).eq('id', id).select().single()
+  const updates = { [flag]: value }
+  if (flag === 'verified' && value) updates.last_verified_at = new Date().toISOString().slice(0, 10)
+  const { data, error } = await supabase.from('support_services').update(updates).eq('id', id).select().single()
   if (error) throw error
   return data
 }
@@ -252,148 +253,163 @@ function buildEquityGroupStats(dimension, users, referrals, positiveScreenUserId
   })
 }
 
+function computeOutcomeDataset({ users, assessments, referrals, followUps, services, adverseEvents, dateRangeDays }) {
+  const cutoff = dateRangeDays > 0 ? Date.now() - dateRangeDays * 24 * 60 * 60 * 1000 : 0
+  const filteredAssessments = assessments.filter(a => Date.parse(a.created_at) >= cutoff)
+  const filteredReferrals = referrals.filter(r => Date.parse(r.created_at) >= cutoff)
+  const filteredFollowUps = followUps.filter(f => Date.parse(f.created_at) >= cutoff)
+
+  const individuals = users.filter(u => u.role === 'individual')
+  const positiveScreenUserIds = new Set(
+    filteredAssessments
+      .filter(a => ['moderate', 'moderately severe', 'severe'].includes(a.severity) || (a.instrument === 'PHQ9' && a.answers?.[8] > 0))
+      .map(a => a.user_id)
+  )
+  const convertedUserIds = new Set(
+    filteredReferrals
+      .filter(r => ['accepted', 'professional_review', 'appointment_scheduled', 'appointment_attended', 'follow_up_completed', 'escalated'].includes(r.status))
+      .map(r => r.user_id)
+  )
+  const convertedCount = Array.from(positiveScreenUserIds).filter(uid => convertedUserIds.has(uid)).length
+  const conversionRate = positiveScreenUserIds.size > 0 ? Math.round((convertedCount / positiveScreenUserIds.size) * 100) : 0
+
+  const nonCancelledReferrals = filteredReferrals.filter(r => r.status !== 'cancelled')
+  const completedReferrals = nonCancelledReferrals.filter(r => r.status === 'follow_up_completed').length
+  const referralCompletionRate = nonCancelledReferrals.length > 0 ? Math.round((completedReferrals / nonCancelledReferrals.length) * 100) : 0
+
+  const scheduledOrAttended = nonCancelledReferrals.filter(r => r.appointment_at || ['appointment_attended', 'follow_up_completed'].includes(r.status))
+  const attendedCount = scheduledOrAttended.filter(r => r.attendance_status === 'attended' || ['appointment_attended', 'follow_up_completed'].includes(r.status)).length
+  const attendanceRate = scheduledOrAttended.length > 0 ? Math.round((attendedCount / scheduledOrAttended.length) * 100) : 0
+
+  const responseWaitHours = nonCancelledReferrals
+    .filter(r => r.first_response_at)
+    .map(r => Math.max(0, (Date.parse(r.first_response_at) - Date.parse(r.created_at)) / 3600000))
+  const sortedWaits = [...responseWaitHours].sort((a, b) => a - b)
+  const avgWaitHours = responseWaitHours.length > 0
+    ? Math.round((responseWaitHours.reduce((a, b) => a + b, 0) / responseWaitHours.length) * 10) / 10
+    : 0
+  const medianWaitHours = sortedWaits.length > 0
+    ? Math.round(sortedWaits[Math.floor(sortedWaits.length / 2)] * 10) / 10
+    : 0
+
+  const timelyCount = nonCancelledReferrals.filter(r => {
+    const limitHours = r.priority === 'urgent' || r.crisis_flagged ? SLA_HOURS.urgent : SLA_HOURS.routine
+    if (!r.first_response_at) return (Date.now() - Date.parse(r.created_at)) / 3600000 <= limitHours
+    return (Date.parse(r.first_response_at) - Date.parse(r.created_at)) / 3600000 <= limitHours
+  }).length
+  const slaComplianceRate = nonCancelledReferrals.length > 0 ? Math.round((timelyCount / nonCancelledReferrals.length) * 100) : 100
+
+  let repeatPairs = 0
+  let improvedPairs = 0
+  individuals.forEach(user => {
+    ['PHQ9', 'GAD7', 'PSS10', 'WHO5'].forEach(instrument => {
+      const series = filteredAssessments
+        .filter(a => a.user_id === user.id && a.instrument === instrument)
+        .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+      if (series.length >= 2) {
+        repeatPairs += 1
+        const improved = instrument === 'WHO5'
+          ? series[series.length - 1].total_score > series[0].total_score
+          : series[series.length - 1].total_score < series[0].total_score
+        if (improved) improvedPairs += 1
+      }
+    })
+  })
+  const improvedFollowUps = filteredFollowUps.filter(f => f.outcome_status === 'improved').length
+  const totalOutcomeEvaluated = repeatPairs + filteredFollowUps.filter(f => f.outcome_status).length
+  const improvementRate = totalOutcomeEvaluated > 0
+    ? Math.round(((improvedPairs + improvedFollowUps) / totalOutcomeEvaluated) * 100)
+    : 0
+
+  const crisisReferrals = filteredReferrals.filter(r => r.crisis_flagged || r.priority === 'urgent' || r.status === 'escalated')
+  const crisisCompleted = crisisReferrals.filter(r => Boolean(r.crisis_completed_at)).length
+  const crisisCompletionRate = crisisReferrals.length > 0 ? Math.round((crisisCompleted / crisisReferrals.length) * 100) : 100
+
+  const serviceUtilisation = TIERS.map(tier => {
+    const count = nonCancelledReferrals.filter(r => {
+      const svc = services.find(s => s.id === r.service_id)
+      return svc?.tier === tier.id
+    }).length
+    return { tier: tier.label, count }
+  })
+
+  const equity = {
+    age_group: buildEquityGroupStats('age_group', users, filteredReferrals, positiveScreenUserIds),
+    gender: buildEquityGroupStats('gender', users, filteredReferrals, positiveScreenUserIds),
+    nationality_group: buildEquityGroupStats('nationality_group', users, filteredReferrals, positiveScreenUserIds),
+    language: buildEquityGroupStats('language', users, filteredReferrals, positiveScreenUserIds),
+    geography: buildEquityGroupStats('geography', users, filteredReferrals, positiveScreenUserIds),
+  }
+
+  const alerts = []
+  Object.entries(equity).forEach(([dimension, rows]) => {
+    rows.forEach(row => {
+      if (!row.suppressed && row.positiveScreens > 0 && row.conversionRate < 70) {
+        alerts.push(`Lower hand-off conversion (${row.conversionRate}%) observed in ${dimension.replace('_', ' ')}: ${row.group}.`)
+      }
+      if (!row.suppressed && row.avgWaitHours !== null && row.avgWaitHours > 48) {
+        alerts.push(`Extended average wait (${row.avgWaitHours}h) observed in ${dimension.replace('_', ' ')}: ${row.group}.`)
+      }
+    })
+  })
+
+  return {
+    totalAssessments: filteredAssessments.length,
+    positiveScreenCount: positiveScreenUserIds.size,
+    convertedCount,
+    conversionRate,
+    referralCompletionRate,
+    attendanceRate,
+    avgWaitHours,
+    medianWaitHours,
+    slaComplianceRate,
+    improvementRate,
+    crisisTotal: crisisReferrals.length,
+    crisisCompleted,
+    crisisCompletionRate,
+    serviceUtilisation,
+    adverseEvents: adverseEvents || [],
+    equity,
+    alerts,
+  }
+}
+
 export async function getOutcomeAndSafetyMetrics(dateRangeDays = 30) {
   if (!supabase) {
     const db = loadDemoDb()
-    const cutoff = dateRangeDays > 0 ? Date.now() - dateRangeDays * 24 * 60 * 60 * 1000 : 0
-    const assessments = db.assessments.filter(a => Date.parse(a.created_at) >= cutoff)
-    const referrals = db.referrals.filter(r => Date.parse(r.created_at) >= cutoff)
-    const followUps = db.follow_ups.filter(f => Date.parse(f.created_at) >= cutoff)
-
-    const individuals = db.users.filter(u => u.role === 'individual')
-    const positiveScreenUserIds = new Set(
-      assessments
-        .filter(a => ['moderate', 'moderately severe', 'severe'].includes(a.severity) || (a.instrument === 'PHQ9' && a.answers?.[8] > 0))
-        .map(a => a.user_id)
-    )
-    const convertedUserIds = new Set(
-      referrals
-        .filter(r => ['accepted', 'professional_review', 'appointment_scheduled', 'appointment_attended', 'follow_up_completed', 'escalated'].includes(r.status))
-        .map(r => r.user_id)
-    )
-    const convertedCount = Array.from(positiveScreenUserIds).filter(uid => convertedUserIds.has(uid)).length
-    const conversionRate = positiveScreenUserIds.size > 0 ? Math.round((convertedCount / positiveScreenUserIds.size) * 100) : 0
-
-    const nonCancelledReferrals = referrals.filter(r => r.status !== 'cancelled')
-    const completedReferrals = nonCancelledReferrals.filter(r => r.status === 'follow_up_completed').length
-    const referralCompletionRate = nonCancelledReferrals.length > 0 ? Math.round((completedReferrals / nonCancelledReferrals.length) * 100) : 0
-
-    const scheduledOrAttended = nonCancelledReferrals.filter(r => r.appointment_at || ['appointment_attended', 'follow_up_completed'].includes(r.status))
-    const attendedCount = scheduledOrAttended.filter(r => r.attendance_status === 'attended' || ['appointment_attended', 'follow_up_completed'].includes(r.status)).length
-    const attendanceRate = scheduledOrAttended.length > 0 ? Math.round((attendedCount / scheduledOrAttended.length) * 100) : 0
-
-    const responseWaitHours = nonCancelledReferrals
-      .filter(r => r.first_response_at)
-      .map(r => Math.max(0, (Date.parse(r.first_response_at) - Date.parse(r.created_at)) / 3600000))
-    const sortedWaits = [...responseWaitHours].sort((a, b) => a - b)
-    const avgWaitHours = responseWaitHours.length > 0
-      ? Math.round((responseWaitHours.reduce((a, b) => a + b, 0) / responseWaitHours.length) * 10) / 10
-      : 0
-    const medianWaitHours = sortedWaits.length > 0
-      ? Math.round(sortedWaits[Math.floor(sortedWaits.length / 2)] * 10) / 10
-      : 0
-
-    const timelyCount = nonCancelledReferrals.filter(r => {
-      const limitHours = r.priority === 'urgent' || r.crisis_flagged ? SLA_HOURS.urgent : SLA_HOURS.routine
-      if (!r.first_response_at) return (Date.now() - Date.parse(r.created_at)) / 3600000 <= limitHours
-      return (Date.parse(r.first_response_at) - Date.parse(r.created_at)) / 3600000 <= limitHours
-    }).length
-    const slaComplianceRate = nonCancelledReferrals.length > 0 ? Math.round((timelyCount / nonCancelledReferrals.length) * 100) : 100
-
-    let repeatPairs = 0
-    let improvedPairs = 0
-    individuals.forEach(user => {
-      ['PHQ9', 'GAD7', 'PSS10', 'WHO5'].forEach(instrument => {
-        const series = assessments
-          .filter(a => a.user_id === user.id && a.instrument === instrument)
-          .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
-        if (series.length >= 2) {
-          repeatPairs += 1
-          const improved = instrument === 'WHO5'
-            ? series[series.length - 1].total_score > series[0].total_score
-            : series[series.length - 1].total_score < series[0].total_score
-          if (improved) improvedPairs += 1
-        }
-      })
-    })
-    const improvedFollowUps = followUps.filter(f => f.outcome_status === 'improved').length
-    const totalOutcomeEvaluated = repeatPairs + followUps.filter(f => f.outcome_status).length
-    const improvementRate = totalOutcomeEvaluated > 0
-      ? Math.round(((improvedPairs + improvedFollowUps) / totalOutcomeEvaluated) * 100)
-      : 0
-
-    const crisisReferrals = referrals.filter(r => r.crisis_flagged || r.priority === 'urgent' || r.status === 'escalated')
-    const crisisCompleted = crisisReferrals.filter(r => Boolean(r.crisis_completed_at)).length
-    const crisisCompletionRate = crisisReferrals.length > 0 ? Math.round((crisisCompleted / crisisReferrals.length) * 100) : 100
-
-    const serviceUtilisation = TIERS.map(tier => {
-      const count = nonCancelledReferrals.filter(r => {
-        const svc = db.support_services.find(s => s.id === r.service_id)
-        return svc?.tier === tier.id
-      }).length
-      return { tier: tier.label, count }
-    })
-
-    const equity = {
-      age_group: buildEquityGroupStats('age_group', db.users, referrals, positiveScreenUserIds),
-      gender: buildEquityGroupStats('gender', db.users, referrals, positiveScreenUserIds),
-      nationality_group: buildEquityGroupStats('nationality_group', db.users, referrals, positiveScreenUserIds),
-      language: buildEquityGroupStats('language', db.users, referrals, positiveScreenUserIds),
-      geography: buildEquityGroupStats('geography', db.users, referrals, positiveScreenUserIds),
-    }
-
-    const alerts = []
-    Object.entries(equity).forEach(([dimension, rows]) => {
-      rows.forEach(row => {
-        if (!row.suppressed && row.positiveScreens > 0 && row.conversionRate < 70) {
-          alerts.push(`Lower hand-off conversion (${row.conversionRate}%) observed in ${dimension.replace('_', ' ')}: ${row.group}.`)
-        }
-        if (!row.suppressed && row.avgWaitHours !== null && row.avgWaitHours > 48) {
-          alerts.push(`Extended average wait (${row.avgWaitHours}h) observed in ${dimension.replace('_', ' ')}: ${row.group}.`)
-        }
-      })
-    })
-
-    return {
-      totalAssessments: assessments.length,
-      positiveScreenCount: positiveScreenUserIds.size,
-      convertedCount,
-      conversionRate,
-      referralCompletionRate,
-      attendanceRate,
-      avgWaitHours,
-      medianWaitHours,
-      slaComplianceRate,
-      improvementRate,
-      crisisTotal: crisisReferrals.length,
-      crisisCompleted,
-      crisisCompletionRate,
-      serviceUtilisation,
+    return computeOutcomeDataset({
+      users: db.users,
+      assessments: db.assessments,
+      referrals: db.referrals,
+      followUps: db.follow_ups,
+      services: db.support_services,
       adverseEvents: db.adverse_events || [],
-      equity,
-      alerts,
-    }
+      dateRangeDays,
+    })
   }
 
-  return {
-    totalAssessments: 0,
-    positiveScreenCount: 0,
-    convertedCount: 0,
-    conversionRate: 0,
-    referralCompletionRate: 0,
-    attendanceRate: 0,
-    avgWaitHours: 0,
-    medianWaitHours: 0,
-    slaComplianceRate: 100,
-    improvementRate: 0,
-    crisisTotal: 0,
-    crisisCompleted: 0,
-    crisisCompletionRate: 100,
-    serviceUtilisation: [],
-    adverseEvents: [],
-    equity: { age_group: [], gender: [], nationality_group: [], language: [], geography: [] },
-    alerts: [],
+  const [usersRes, assessmentsRes, referralsRes, followUpsRes, servicesRes, adverseRes] = await Promise.all([
+    supabase.from('profiles').select('id, role, equity'),
+    supabase.from('assessments').select('user_id, instrument, total_score, severity, answers, created_at'),
+    supabase.from('referrals').select('id, user_id, service_id, status, priority, crisis_flagged, crisis_completed_at, first_response_at, appointment_at, attendance_status, created_at'),
+    supabase.from('follow_ups').select('id, outcome_status, created_at'),
+    supabase.from('support_services').select('id, tier'),
+    supabase.from('adverse_events').select('*').order('created_at', { ascending: false }),
+  ])
+
+  for (const res of [usersRes, assessmentsRes, referralsRes, followUpsRes, servicesRes, adverseRes]) {
+    if (res.error) throw res.error
   }
+
+  return computeOutcomeDataset({
+    users: usersRes.data || [],
+    assessments: assessmentsRes.data || [],
+    referrals: referralsRes.data || [],
+    followUps: followUpsRes.data || [],
+    services: servicesRes.data || [],
+    adverseEvents: adverseRes.data || [],
+    dateRangeDays,
+  })
 }
 
 export async function updateAdverseEventStatus(id, status) {
@@ -407,5 +423,7 @@ export async function updateAdverseEventStatus(id, status) {
     saveDemoDb(db)
     return item
   }
-  throw new Error('Requires extended Supabase schema.')
+  const { data, error } = await supabase.from('adverse_events').update({ status }).eq('id', id).select().single()
+  if (error) throw error
+  return data
 }

@@ -4,6 +4,7 @@ import { useAuth } from '../context/auth'
 import { useI18n } from '../context/i18n'
 import {
   OUTCOME_OPTIONS,
+  acceptReferral,
   acknowledgeCrisis,
   addFollowUp,
   allowedStatuses,
@@ -95,6 +96,36 @@ function ReferralCard({ referral, actorId, mode, refresh }) {
     }
   }
 
+  async function handleAccept() {
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      await acceptReferral(referral.id, actorId)
+      setMessage('Referral accepted and moved to clinician review.')
+      refresh()
+    } catch (err) {
+      setError(err.message || 'Unable to accept referral.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleDecline() {
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      await updateReferralStatus(referral.id, 'declined', actorId)
+      setMessage('Referral marked as declined so alternative options can be offered.')
+      refresh()
+    } catch (err) {
+      setError(err.message || 'Unable to decline referral.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function handleCompleteCrisis() {
     setBusy(true)
     setError('')
@@ -153,6 +184,17 @@ function ReferralCard({ referral, actorId, mode, refresh }) {
       <p className="muted">
         Created: {formatDate(referral.created_at)} · Last updated: {formatDate(referral.updated_at)}
       </p>
+
+      {statuses.length > 0 && ['support_requested', 'submitted', 'received', 'pending'].includes(referral.status) && (
+        <div className="actions">
+          <Button disabled={busy} onClick={handleAccept}>
+            {busy ? 'Accepting…' : 'Accept referral'}
+          </Button>
+          <Button className="button-secondary" disabled={busy} onClick={handleDecline}>
+            Decline
+          </Button>
+        </div>
+      )}
 
       {isUrgent && (
         <div className="notice" role="region" aria-label="Crisis handover tracking">

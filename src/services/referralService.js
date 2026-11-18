@@ -13,7 +13,6 @@ export const STATUS = {
   declined: { label: 'Declined', description: 'This service could not accept your referral. Alternative options are available.', terminal: true },
   cancelled: { label: 'Cancelled', description: 'This referral has been cancelled.', terminal: true },
   unsuccessful_handover: { label: 'Unsuccessful handover', description: 'Handover could not be completed. Coordinator follow-up or alternative options are available.', terminal: true },
-  // Compatibility aliases if Supabase legacy rows exist
   pending: { label: 'Pending', description: 'Your referral is waiting for clinician review.', terminal: false },
   accepted: { label: 'Accepted', description: 'A licensed professional has accepted your referral.', terminal: false },
   unable_to_contact: { label: 'Unable to contact', description: 'Contact could not be established. You can explore other options.', terminal: true },
@@ -112,13 +111,21 @@ export async function createReferral({ userId, serviceId, shareResults, shareCon
     return hydrateDemoReferral(db, record, true)
   }
 
+  const { data: svc } = await supabase.from('support_services').select('tier').eq('id', serviceId).maybeSingle()
+  const isUrgent = Boolean(crisisFlagged || priority === 'urgent' || svc?.tier === 'urgent_emergency')
+
   const { data, error } = await supabase
     .from('referrals')
     .insert({
       service_id: serviceId,
-      status: 'pending',
+      status: isUrgent ? 'escalated' : 'submitted',
+      priority: isUrgent ? 'urgent' : 'routine',
+      crisis_flagged: isUrgent,
+      appointment_mode: appointmentMode || (isUrgent ? 'Urgent clinician outreach' : 'To be scheduled'),
+      attendance_status: 'pending',
       share_results: Boolean(shareResults),
       share_contact: Boolean(shareContact),
+      share_physical_context: Boolean(sharePhysicalContext),
       user_note: userNote?.trim() || null,
     })
     .select(referralFields)
@@ -174,19 +181,22 @@ export async function submitReferralFeedback(referralId, rating, comment) {
   if (!Number.isInteger(safeRating) || safeRating < 1 || safeRating > 5) {
     throw new Error('Select a rating between 1 and 5.')
   }
+  const payload = {
+    rating: safeRating,
+    comment: comment?.trim() || '',
+    created_at: new Date().toISOString(),
+  }
   if (!supabase) {
     const db = loadDemoDb()
     const referral = db.referrals.find(r => r.id === referralId)
     if (!referral) throw new Error('Referral not found.')
-    referral.feedback = {
-      rating: safeRating,
-      comment: comment?.trim() || '',
-      created_at: new Date().toISOString(),
-    }
+    referral.feedback = payload
     referral.updated_at = new Date().toISOString()
     appendDemoAudit(db, referral.user_id, 'FEEDBACK_SUBMITTED', 'referrals', referralId)
     saveDemoDb(db)
     return referral.feedback
   }
-  throw new Error('Experience feedback requires the extended schema.')
+  const { data, error } = await supabase.from('referrals').update({ feedback: payload }).eq('id', referralId).select('feedback').single()
+  if (error) throw error
+  return data.feedback
 }

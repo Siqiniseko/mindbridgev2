@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { supabase } from '../lib/supabase'
+import { supabase, supabaseKeyError } from '../lib/supabase'
 import {
   buildDemoSession,
   demoResetPassword,
@@ -13,6 +13,8 @@ import {
 import { AuthContext } from './auth'
 import { getConsentRecords } from '../services/consentService'
 
+const PROFILE_FIELDS = 'id, email, full_name, role, physical_context, equity'
+
 async function loadConsents(id) {
   const rows = await getConsentRecords(id)
   return {
@@ -20,6 +22,17 @@ async function loadConsents(id) {
     values: Object.fromEntries(rows.map(row => [row.consent_type, row.granted])),
     dates: Object.fromEntries(rows.map(row => [row.consent_type, row.updated_at])),
     error: '',
+  }
+}
+
+function fallbackProfileFromSession(session) {
+  return {
+    id: session.user.id,
+    email: session.user.email || '',
+    full_name: session.user.user_metadata?.full_name || '',
+    role: 'individual',
+    physical_context: null,
+    equity: {},
   }
 }
 
@@ -32,6 +45,7 @@ function loadDemoProfileState(userId) {
     session: buildDemoSession(user),
     profile: {
       id: user.id,
+      email: user.email,
       full_name: user.full_name,
       role: user.role,
       physical_context: user.physical_context || null,
@@ -50,6 +64,7 @@ export function AuthProvider({ children }) {
       : loadDemoProfileState(getDemoSessionUserId())
   )
   const [consentState, setConsentState] = useState({ userId: null, values: {}, dates: {}, error: '' })
+  const [passwordRecovery, setPasswordRecovery] = useState(false)
   const userId = auth.session?.user.id
 
   useEffect(() => {
@@ -71,7 +86,7 @@ export function AuthProvider({ children }) {
       setAuth(loadDemoProfileState(userId))
       return
     }
-    const { data, error } = await supabase.from('profiles').select('id, full_name, role').eq('id', userId).maybeSingle()
+    const { data, error } = await supabase.from('profiles').select(PROFILE_FIELDS).eq('id', userId).maybeSingle()
     if (!error && data) {
       setAuth(prev => ({ ...prev, profile: data, role: data.role || 'individual' }))
     }
@@ -86,14 +101,27 @@ export function AuthProvider({ children }) {
       setAuth({ session, profile: null, role: 'individual', loading: Boolean(session), profileError: '' })
       if (!session) return
       try {
-        const { data, error } = await supabase.from('profiles').select('id, full_name, role').eq('id', session.user.id).maybeSingle()
+        const { data, error } = await supabase.from('profiles').select(PROFILE_FIELDS).eq('id', session.user.id).maybeSingle()
         if (error) throw error
-        if (active && current === revision) setAuth({ session, profile: data, role: data?.role || 'individual', loading: false, profileError: '' })
+        const profile = data || fallbackProfileFromSession(session)
+        if (active && current === revision) {
+          setAuth({ session, profile, role: profile.role || 'individual', loading: false, profileError: '' })
+        }
       } catch {
-        if (active && current === revision) setAuth({ session, profile: null, role: 'individual', loading: false, profileError: 'Your profile could not be loaded. Please try signing in again.' })
+        if (active && current === revision) {
+          setAuth({
+            session,
+            profile: fallbackProfileFromSession(session),
+            role: 'individual',
+            loading: false,
+            profileError: 'Your profile details could not be loaded completely. Refresh to retry.',
+          })
+        }
       }
     }
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') setPasswordRecovery(true)
+      if (event === 'SIGNED_OUT') setPasswordRecovery(false)
       setTimeout(() => { if (active) void updateSession(session) }, 0)
     })
     const initialRevision = revision
@@ -114,7 +142,19 @@ export function AuthProvider({ children }) {
       if (!result.error && result.data.user) setAuth(loadDemoProfileState(result.data.user.id))
       return result
     }
-    return supabase.auth.signUp({ email, password, options: { data: { full_name: fullName } } })
+    const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined
+    const res = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: {
+        emailRedirectTo: redirectTo,
+        data: { full_name: fullName.trim() },
+      },
+    })
+    if (!res.error && res.data?.session?.user) {
+      res.data.role = 'individual'
+    }
+    return res
   }
 
   async function handleSignIn(email, password) {
@@ -123,7 +163,23 @@ export function AuthProvider({ children }) {
       if (!result.error && result.data.user) setAuth(loadDemoProfileState(result.data.user.id))
       return result
     }
-    return supabase.auth.signInWithPassword({ email, password })
+    const res = await supabase.auth.signInWithPassword({ email: email.trim(), password })
+    if (!res.error && res.data?.user) {
+      const { data: prof } = await supabase.from('profiles').select('role').eq('id', res.data.user.id).maybeSingle()
+      res.data.role = prof?.role || 'individual'
+    }
+    return res
+  }
+
+  async function handleMagicLink(email) {
+    if (!supabase) {
+      return { error: { message: 'Magic link email sign-in requires a connected Supabase project.' } }
+    }
+    const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined
+    return supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: redirectTo },
+    })
   }
 
   async function handleDemoRoleSignIn(role) {
@@ -136,10 +192,22 @@ export function AuthProvider({ children }) {
     if (!supabase) {
       return demoResetPassword(email, newPassword)
     }
-    return supabase.auth.resetPasswordForEmail(email)
+    const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined
+    return supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo })
+  }
+
+  async function handleUpdateRecoveryPassword(newPassword) {
+    if (!supabase) {
+      setPasswordRecovery(false)
+      return { error: null }
+    }
+    const res = await supabase.auth.updateUser({ password: newPassword })
+    if (!res.error) setPasswordRecovery(false)
+    return res
   }
 
   async function handleSignOut() {
+    setPasswordRecovery(false)
     if (!supabase) {
       const result = demoSignOut()
       setAuth({ session: null, profile: null, role: 'individual', loading: false, profileError: '' })
@@ -153,7 +221,9 @@ export function AuthProvider({ children }) {
     ...auth,
     user: auth.session?.user ?? null,
     configured: true,
+    configError: supabaseKeyError,
     demoMode: !supabase,
+    passwordRecovery,
     consents: consentState.userId === userId ? consentState.values : {},
     consentDates: consentState.userId === userId ? consentState.dates : {},
     consentError: consentState.userId === userId ? consentState.error : '',
@@ -162,8 +232,10 @@ export function AuthProvider({ children }) {
     refreshProfile,
     signUp: handleSignUp,
     signIn: handleSignIn,
+    sendMagicLink: handleMagicLink,
     demoSignIn: handleDemoRoleSignIn,
     resetPassword: handleResetPassword,
+    updateRecoveryPassword: handleUpdateRecoveryPassword,
     signOut: handleSignOut,
   }
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

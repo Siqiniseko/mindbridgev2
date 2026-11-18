@@ -43,15 +43,17 @@ export async function setConsent(userId, type, granted) {
     saveDemoDb(db)
     return
   }
-  const { error } = await supabase.from('consents').upsert({ user_id: userId, consent_type: type, granted, updated_at: new Date().toISOString() }, { onConflict: 'user_id,consent_type' })
+  const { error } = await supabase
+    .from('consents')
+    .upsert({ user_id: userId, consent_type: type, granted: Boolean(granted), updated_at: new Date().toISOString() }, { onConflict: 'user_id,consent_type' })
   if (error) throw error
 }
 
 export async function withdrawSharing(userId, type) {
   if (!OPTIONAL_SHARING_TYPES.includes(type)) throw new Error('Choose an optional sharing preference.')
+  const activeStatuses = ['support_requested', 'submitted', 'received', 'professional_review', 'appointment_scheduled', 'escalated', 'pending', 'accepted']
   if (isDemo()) {
     const db = loadDemoDb()
-    const activeStatuses = ['support_requested', 'submitted', 'received', 'professional_review', 'appointment_scheduled', 'escalated', 'pending', 'accepted']
     if (['share_results', 'share_contact', 'share_physical_context'].includes(type)) {
       db.referrals.forEach(referral => {
         if (referral.user_id === userId && activeStatuses.includes(referral.status)) {
@@ -64,8 +66,12 @@ export async function withdrawSharing(userId, type) {
     await setConsent(userId, type, false)
     return
   }
-  if (['share_results', 'share_contact'].includes(type)) {
-    const { error } = await supabase.from('referrals').update({ [type]: false }).eq('user_id', userId).in('status', ['pending', 'accepted', 'appointment_scheduled'])
+  if (['share_results', 'share_contact', 'share_physical_context'].includes(type)) {
+    const { error } = await supabase
+      .from('referrals')
+      .update({ [type]: false })
+      .eq('user_id', userId)
+      .in('status', activeStatuses)
     if (error) throw error
   }
   await setConsent(userId, type, false)
@@ -139,5 +145,14 @@ export async function eraseMyWellbeingData(userId) {
     saveDemoDb(db)
     return
   }
-  throw new Error('Self-service full erasure requires administrator confirmation when connected to external Supabase auth.')
+
+  const { error: refErr } = await supabase.from('referrals').delete().eq('user_id', userId)
+  if (refErr) throw refErr
+  const { error: asmErr } = await supabase.from('assessments').delete().eq('user_id', userId)
+  if (asmErr) throw asmErr
+  const { error: profErr } = await supabase.from('profiles').update({ physical_context: null, equity: {} }).eq('id', userId)
+  if (profErr) throw profErr
+  for (const type of OPTIONAL_SHARING_TYPES) {
+    await setConsent(userId, type, false)
+  }
 }

@@ -28,11 +28,19 @@ export async function saveAssessment(userId, instrumentId, answers, extras = {})
 
   const { data, error } = await supabase
     .from('assessments')
-    .insert({ user_id: userId, instrument: instrumentId, total_score: total, severity, answers })
+    .insert({
+      user_id: userId,
+      instrument: instrumentId,
+      total_score: total,
+      severity,
+      answers,
+      functioning,
+      opt_in_signals: optInSignals,
+    })
     .select()
     .single()
   if (error) throw error
-  return { ...data, functioning, opt_in_signals: optInSignals }
+  return data
 }
 
 export async function listAssessments(userId) {
@@ -44,7 +52,7 @@ export async function listAssessments(userId) {
   }
   const { data, error } = await supabase
     .from('assessments')
-    .select('id, instrument, total_score, severity, created_at')
+    .select('id, instrument, total_score, severity, functioning, opt_in_signals, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
   if (error) throw error

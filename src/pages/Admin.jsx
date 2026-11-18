@@ -339,9 +339,9 @@ export default function Admin() {
                     <td>{referral.service?.name || 'Service details unavailable'}</td>
                     <td>{STATUS[referral.status]?.label || referral.status}</td>
                     <td>
-                      {['pending', 'submitted', 'received'].includes(referral.status) ? (
+                      {['support_requested', 'pending', 'submitted', 'received'].includes(referral.status) ? (
                         <Button disabled={busyReferralId !== null} onClick={() => acceptReferral(referral)}>
-                          {busyReferralId === referral.id ? 'Moving…' : 'Advance to review'}
+                          {busyReferralId === referral.id ? 'Accepting…' : 'Accept referral'}
                         </Button>
                       ) : (
                         <span className="muted">—</span>

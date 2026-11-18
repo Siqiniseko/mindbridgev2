@@ -14,17 +14,56 @@ const ROLE_DESTINATIONS = {
 }
 
 export default function AuthForm({ register = false }) {
-  const { session, role, loading, demoMode, signIn, signUp, demoSignIn, resetPassword } = useAuth()
+  const {
+    session,
+    role,
+    loading,
+    demoMode,
+    configError,
+    passwordRecovery,
+    signIn,
+    signUp,
+    sendMagicLink,
+    demoSignIn,
+    resetPassword,
+    updateRecoveryPassword,
+  } = useAuth()
   const { lang } = useI18n()
   const isAr = lang === 'ar'
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [showReset, setShowReset] = useState(false)
+  const [magicEmail, setMagicEmail] = useState('')
   const navigate = useNavigate()
 
-  if (!loading && session) {
+  if (!loading && session && !passwordRecovery) {
     return <Navigate to={ROLE_DESTINATIONS[role] || '/dashboard'} replace />
+  }
+
+  async function submitRecoveryUpdate(event) {
+    event.preventDefault()
+    setError('')
+    setMessage('')
+    const form = new FormData(event.currentTarget)
+    const newPassword = form.get('recoveryPassword')
+    const confirm = form.get('recoveryConfirm')
+    if (!newPassword || newPassword.length < 8) {
+      return setError('Use a new password with at least 8 characters.')
+    }
+    if (newPassword !== confirm) {
+      return setError('The passwords do not match.')
+    }
+    setBusy(true)
+    try {
+      const { error: updateErr } = await updateRecoveryPassword(newPassword)
+      if (updateErr) throw updateErr
+      navigate(ROLE_DESTINATIONS[role] || '/dashboard', { replace: true })
+    } catch (err) {
+      setError(err.message || 'Unable to update your password.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function submit(event) {
@@ -47,14 +86,38 @@ export default function AuthForm({ register = false }) {
     try {
       const { data, error: authError } = register ? await signUp(email, password, name) : await signIn(email, password)
       if (authError) throw authError
-      if (data.session) {
+      if (data?.session) {
         const nextRole = data.role || data.user?.user_metadata?.role || role
         navigate(register ? '/consent' : ROLE_DESTINATIONS[nextRole] || '/dashboard', { replace: true })
       } else {
-        setMessage('Check your email to confirm your account before logging in.')
+        setMessage('Account created! Check your email inbox and click the confirmation link before logging in.')
       }
     } catch (err) {
-      setError(err.message || 'We could not connect. Please try again.')
+      const msg = err.message || 'We could not connect. Please try again.'
+      if (/secret API key/i.test(msg)) {
+        setError('Supabase rejected VITE_SUPABASE_ANON_KEY because a secret/service_role key was used instead of the public Publishable / anon key. Replace VITE_SUPABASE_ANON_KEY with your sb_publishable_... (or anon) key and rotate the secret key in Supabase.')
+      } else {
+        setError(msg)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleMagicLink() {
+    setError('')
+    setMessage('')
+    const email = magicEmail.trim()
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return setError('Enter your email address above first to receive a magic sign-in link.')
+    }
+    setBusy(true)
+    try {
+      const { error: otpErr } = await sendMagicLink(email)
+      if (otpErr) throw otpErr
+      setMessage(`Sign-in link sent to ${email}. Check your inbox and open the link in this browser.`)
+    } catch (err) {
+      setError(err.message || 'Unable to send magic sign-in link.')
     } finally {
       setBusy(false)
     }
@@ -66,8 +129,11 @@ export default function AuthForm({ register = false }) {
     setMessage('')
     const form = new FormData(event.currentTarget)
     const email = form.get('resetEmail').trim()
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return setError('Please enter a valid account email address.')
+    }
     const newPassword = form.get('newPassword')
-    if (!email || !newPassword || newPassword.length < 8) {
+    if (demoMode && (!newPassword || newPassword.length < 8)) {
       return setError('Enter your email and a new password of at least 8 characters.')
     }
     setBusy(true)
@@ -75,7 +141,11 @@ export default function AuthForm({ register = false }) {
       const { error: resetErr } = await resetPassword(email, newPassword)
       if (resetErr) throw resetErr
       setShowReset(false)
-      setMessage('Password updated. You can now log in with your new password.')
+      setMessage(
+        demoMode
+          ? 'Password updated. You can now log in with your new password.'
+          : `Password reset email sent to ${email}. Open the link in your email to choose a new password.`
+      )
     } catch (err) {
       setError(err.message || 'Unable to reset password.')
     } finally {
@@ -97,6 +167,34 @@ export default function AuthForm({ register = false }) {
     }
   }
 
+  if (passwordRecovery) {
+    return (
+      <section className="auth-card card">
+        <p className="eyebrow">ACCOUNT RECOVERY</p>
+        <h1>Set a new password</h1>
+        <p>Enter a new password (at least 8 characters) to finish recovering your Supabase account.</p>
+        <form onSubmit={submitRecoveryUpdate} noValidate>
+          <label>
+            New password
+            <input name="recoveryPassword" type="password" minLength={8} required disabled={busy} />
+          </label>
+          <label>
+            Confirm new password
+            <input name="recoveryConfirm" type="password" minLength={8} required disabled={busy} />
+          </label>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
+          <Button type="submit" disabled={busy}>
+            {busy ? 'Updating…' : 'Save new password'}
+          </Button>
+        </form>
+      </section>
+    )
+  }
+
   return (
     <section className="auth-card card">
       <p className="eyebrow">{isAr ? 'خطوة آمنة لرفاهك' : 'A SMALL STEP FOR YOURSELF'}</p>
@@ -110,6 +208,18 @@ export default function AuthForm({ register = false }) {
             ? 'سجّل الدخول إلى مساحتك الخاصة.'
             : 'Log in to your wellbeing or clinical role workspace.'}
       </p>
+
+      {configError && (
+        <p className="error" role="alert">
+          {configError}
+        </p>
+      )}
+
+      {!demoMode && (
+        <p className="notice" role="status">
+          <strong>Live Supabase authentication connected.</strong> Sign in with your registered email and password, request a magic link, or create a new account.
+        </p>
+      )}
 
       {demoMode && (
         <div className="notice" role="status">
@@ -152,7 +262,14 @@ export default function AuthForm({ register = false }) {
           )}
           <label>
             {isAr ? 'البريد الإلكتروني' : 'Email address'}
-            <input name="email" type="email" autoComplete="email" required />
+            <input
+              name="email"
+              type="email"
+              autoComplete="email"
+              required
+              value={magicEmail}
+              onChange={e => setMagicEmail(e.target.value)}
+            />
           </label>
           <label>
             {isAr ? 'كلمة المرور' : 'Password'}
@@ -184,9 +301,16 @@ export default function AuthForm({ register = false }) {
               {message}
             </p>
           )}
-          <Button type="submit" disabled={busy || loading}>
-            {busy ? 'Please wait…' : register ? (isAr ? 'إنشاء حساب' : 'Create account') : isAr ? 'دخول' : 'Log in'}
-          </Button>
+          <div className="actions">
+            <Button type="submit" disabled={busy || loading}>
+              {busy ? 'Please wait…' : register ? (isAr ? 'إنشاء حساب' : 'Create account') : isAr ? 'دخول' : 'Log in'}
+            </Button>
+            {!demoMode && !register && (
+              <Button className="button-secondary" disabled={busy || loading} onClick={handleMagicLink}>
+                Email magic link
+              </Button>
+            )}
+          </div>
         </form>
       ) : (
         <form onSubmit={submitReset} noValidate>
@@ -194,10 +318,12 @@ export default function AuthForm({ register = false }) {
             Account email
             <input name="resetEmail" type="email" required />
           </label>
-          <label>
-            New password (min 8 chars)
-            <input name="newPassword" type="password" minLength={8} required />
-          </label>
+          {demoMode && (
+            <label>
+              New password (min 8 chars)
+              <input name="newPassword" type="password" minLength={8} required />
+            </label>
+          )}
           {error && (
             <p className="error" role="alert">
               {error}
@@ -205,7 +331,7 @@ export default function AuthForm({ register = false }) {
           )}
           <div className="actions">
             <Button type="submit" disabled={busy}>
-              Reset password
+              {demoMode ? 'Reset password' : 'Send reset email'}
             </Button>
             <Button className="button-secondary" disabled={busy} onClick={() => setShowReset(false)}>
               Back to login
