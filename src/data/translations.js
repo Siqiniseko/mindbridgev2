@@ -19,14 +19,14 @@ export const translations = {
       myRequests: 'My requests',
     },
     hero: {
-      eyebrow: 'ABU DHABI DIGITAL WELLBEING NAVIGATION',
+      eyebrow: 'Abu Dhabi digital wellbeing navigation',
       title: 'Your wellbeing matters. Recognise changes early and find the right support.',
       subtitle:
         'A human-centred, clinically responsible care-navigation platform designed for Abu Dhabi. Understand validated screening results over time, explore trusted stepped support, and connect with licensed professionals — while keeping privacy, autonomy, and human oversight at the centre.',
       ctaPrimary: 'Start your journey',
       ctaDemo: 'Explore role workspaces',
       ctaPrivacy: 'Privacy & safety approach',
-      journeyLabel: 'COMPLETE CARE JOURNEY',
+      journeyLabel: 'Complete care journey',
       journeySteps: ['Recognise', 'Understand', 'Navigate', 'Connect', 'Follow Up', 'Measure Outcomes'],
       disclaimer: 'Voluntary early screening · Not a medical diagnosis · No employer data exposure · Licensed clinicians remain final decision makers.',
     },
@@ -37,7 +37,7 @@ export const translations = {
       bannerNote: 'Automated screening is not monitored continuously. In immediate danger, call 998 or visit the nearest emergency department.',
     },
     landing: {
-      howEyebrow: 'HOW MINDBRIDGE AI WORKS',
+      howEyebrow: 'How MindBridge AI works',
       howTitle: 'Closing the gap between screening and timely human support',
       privacyTitle: 'Privacy, consent & Abu Dhabi regulatory alignment',
       privacyBody:

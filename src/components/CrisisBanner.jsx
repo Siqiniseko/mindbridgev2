@@ -4,8 +4,10 @@ export default function CrisisBanner() {
   const { t } = useI18n()
   return (
     <aside className="crisis-banner" aria-label="Urgent support">
-      {t.crisis.bannerPrefix} <strong>{t.crisis.sakina}</strong> · <strong>{t.crisis.ambulance}</strong>
-      <span> · {t.crisis.bannerNote}</span>
+      <span>{t.crisis.bannerPrefix}</span>{' '}
+      <strong>{t.crisis.sakina}</strong>{' '}
+      <span aria-hidden="true">·</span>{' '}
+      <strong>{t.crisis.ambulance}</strong>
     </aside>
   )
 }

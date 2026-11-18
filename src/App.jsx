@@ -1,4 +1,5 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Link, Navigate, Route, Routes } from 'react-router-dom'
+import { HeartHandshake } from 'lucide-react'
 import { AuthProvider } from './context/AuthContext'
 import { I18nProvider } from './context/I18nContext'
 import { useAuth } from './context/auth'
@@ -27,7 +28,8 @@ function ReferralHome() {
 }
 
 function AppShell() {
-  const { t } = useI18n()
+  const { lang, t } = useI18n()
+  const isAr = lang === 'ar'
   return (
     <>
       <a className="skip-link" href="#main">
@@ -74,7 +76,27 @@ function AppShell() {
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>
-      <footer className="site-footer">{t.footer}</footer>
+      <footer className="site-footer">
+        <div className="footer-grid">
+          <div className="footer-brand">
+            <span className="footer-brand-title">
+              <HeartHandshake size={18} strokeWidth={1.8} aria-hidden="true" />
+              <strong>{t.brand}</strong>
+            </span>
+            <p>{t.tagline}</p>
+          </div>
+          <nav className="footer-links" aria-label="Footer navigation">
+            <Link to="/register">{t.nav.register}</Link>
+            <Link to="/login">{t.nav.login}</Link>
+            <Link to="/privacy">{t.nav.privacy}</Link>
+          </nav>
+          <p className="footer-note">
+            {isAr
+              ? 'فحص مبكر طوعي وتوجيه للرعاية في أبوظبي · ليس خدمة تشخيصية أو طوارئ. للطوارئ اتصل بـ 998 أو سكينة 800-725462.'
+              : t.footer}
+          </p>
+        </div>
+      </footer>
       <CrisisBanner />
     </>
   )

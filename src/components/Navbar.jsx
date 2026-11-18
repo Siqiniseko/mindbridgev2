@@ -28,9 +28,10 @@ export default function Navbar() {
     <header className="site-header">
       <div className="nav-shell">
         <Link to="/" className="brand" onClick={() => setOpen(false)}>
-          <HeartHandshake aria-hidden="true" />
+          <HeartHandshake size={24} strokeWidth={1.9} aria-hidden="true" />
           <span>{t.brand}</span>
         </Link>
+
         <Button
           className="menu-toggle button-secondary"
           aria-label={open ? 'Close menu' : 'Open menu'}
@@ -38,8 +39,9 @@ export default function Navbar() {
           aria-controls="main-nav"
           onClick={() => setOpen(!open)}
         >
-          {open ? <X /> : <Menu />}
+          {open ? <X size={20} /> : <Menu size={20} />}
         </Button>
+
         <nav
           id="main-nav"
           className={open ? 'nav-links is-open' : 'nav-links'}
@@ -48,53 +50,55 @@ export default function Navbar() {
             if (event.target.closest('a')) setOpen(false)
           }}
         >
-          {session && role === 'individual' && (
-            <>
-              <NavLink to="/dashboard">{t.nav.dashboard}</NavLink>
-              <NavLink to="/assessment">{t.nav.assessment}</NavLink>
-              <NavLink to="/support">{t.nav.support}</NavLink>
-              <NavLink to="/referrals">{t.nav.referrals}</NavLink>
-            </>
-          )}
-          {session && role === 'professional' && (
-            <>
-              <NavLink to="/professional">{t.nav.professional}</NavLink>
-              <NavLink to="/my-referrals">{t.nav.myRequests}</NavLink>
-            </>
-          )}
-          {session && role === 'primary_care' && <NavLink to="/primary-care">{t.nav.primaryCare}</NavLink>}
-          {session && role === 'coordinator' && <NavLink to="/coordinator">{t.nav.coordinator}</NavLink>}
-          {session && role === 'admin' && (
-            <>
-              <NavLink to="/admin">{t.nav.admin}</NavLink>
-              <NavLink to="/analytics">{t.nav.analytics}</NavLink>
-            </>
-          )}
-          {session && role === 'analyst' && <NavLink to="/analytics">{t.nav.analytics}</NavLink>}
-          <NavLink to="/privacy">{t.nav.privacy}</NavLink>
+          <div className="nav-center">
+            {session && role === 'individual' && (
+              <>
+                <NavLink to="/dashboard">{t.nav.dashboard}</NavLink>
+                <NavLink to="/assessment">{t.nav.assessment}</NavLink>
+                <NavLink to="/support">{t.nav.support}</NavLink>
+                <NavLink to="/referrals">{t.nav.referrals}</NavLink>
+              </>
+            )}
+            {session && role === 'professional' && (
+              <>
+                <NavLink to="/professional">{t.nav.professional}</NavLink>
+                <NavLink to="/my-referrals">{t.nav.myRequests}</NavLink>
+              </>
+            )}
+            {session && role === 'primary_care' && <NavLink to="/primary-care">{t.nav.primaryCare}</NavLink>}
+            {session && role === 'coordinator' && <NavLink to="/coordinator">{t.nav.coordinator}</NavLink>}
+            {session && role === 'admin' && (
+              <>
+                <NavLink to="/admin">{t.nav.admin}</NavLink>
+                <NavLink to="/analytics">{t.nav.analytics}</NavLink>
+              </>
+            )}
+            {session && role === 'analyst' && <NavLink to="/analytics">{t.nav.analytics}</NavLink>}
+            <NavLink to="/privacy">{t.nav.privacy}</NavLink>
+            {!session && <NavLink to="/login">{t.nav.login}</NavLink>}
+          </div>
 
-          <button
-            type="button"
-            className="lang-switch"
-            aria-label={lang === 'en' ? 'Switch language to Arabic' : 'تبديل اللغة إلى الإنجليزية'}
-            onClick={() => setLang(lang === 'en' ? 'ar' : 'en')}
-          >
-            <Globe size={16} aria-hidden="true" />
-            <span>{lang === 'en' ? 'العربية' : 'English'}</span>
-          </button>
+          <div className="nav-actions">
+            <button
+              type="button"
+              className="lang-switch"
+              aria-label={lang === 'en' ? 'Switch language to Arabic' : 'تبديل اللغة إلى الإنجليزية'}
+              onClick={() => setLang(lang === 'en' ? 'ar' : 'en')}
+            >
+              <Globe size={15} aria-hidden="true" />
+              <span>{lang === 'en' ? 'العربية' : 'English'}</span>
+            </button>
 
-          {session ? (
-            <Button className="button-secondary" onClick={logout}>
-              {t.nav.logout}
-            </Button>
-          ) : (
-            <>
-              <NavLink to="/login">{t.nav.login}</NavLink>
-              <Link className="button" to="/register">
+            {session ? (
+              <Button className="button-secondary nav-cta" onClick={logout}>
+                {t.nav.logout}
+              </Button>
+            ) : (
+              <Link className="button nav-cta" to="/register">
                 {t.nav.register}
               </Link>
-            </>
-          )}
+            )}
+          </div>
         </nav>
       </div>
       {error && (
