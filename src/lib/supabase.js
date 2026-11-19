@@ -1,7 +1,11 @@
 import { createClient } from '@supabase/supabase-js'
 
 const url = import.meta.env.VITE_SUPABASE_URL?.trim()
-const key = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
+const key = (
+  import.meta.env.VITE_SUPABASE_ANON_KEY ||
+  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  import.meta.env.VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY
+)?.trim()
 
 function isBrowserForbiddenSecretKey(value) {
   if (!value) return false
@@ -18,8 +22,29 @@ function isBrowserForbiddenSecretKey(value) {
   return false
 }
 
+function isValidUrl(value) {
+  if (!value) return false
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
 export const supabaseKeyError = isBrowserForbiddenSecretKey(key)
   ? 'A Supabase secret/service_role key was placed in VITE_SUPABASE_ANON_KEY. Secret keys are forbidden in the browser — replace VITE_SUPABASE_ANON_KEY with your Supabase Publishable / anon public key (sb_publishable_... or anon JWT) and rotate the exposed secret key in Supabase.'
-  : ''
+  : url && !isValidUrl(url)
+    ? 'VITE_SUPABASE_URL must be a valid https:// project URL (for example https://your-project.supabase.co).'
+    : ''
 
-export const supabase = url && key && !supabaseKeyError ? createClient(url, key) : null
+export const supabase =
+  isValidUrl(url) && key && !supabaseKeyError
+    ? createClient(url, key, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+        },
+      })
+    : null

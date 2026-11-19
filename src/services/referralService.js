@@ -27,6 +27,17 @@ export const HAPPY_PATH = [
   'follow_up_completed',
 ]
 
+export const CANCELLABLE_STATUSES = [
+  'support_requested',
+  'submitted',
+  'received',
+  'professional_review',
+  'appointment_scheduled',
+  'escalated',
+  'pending',
+  'accepted',
+]
+
 export const pendingReminder = 'No response yet beyond the expected window. You can wait, contact the service directly, or explore tele-mental health / alternatives.'
 
 export const SLA_HOURS = {
@@ -165,14 +176,24 @@ export async function cancelReferral(id) {
     const db = loadDemoDb()
     const referral = db.referrals.find(r => r.id === id)
     if (!referral) throw new Error('Referral not found.')
+    if (!CANCELLABLE_STATUSES.includes(referral.status)) {
+      throw new Error('This referral cannot be cancelled. It may have already ended or been updated.')
+    }
     referral.status = 'cancelled'
     referral.updated_at = new Date().toISOString()
     appendDemoAudit(db, referral.user_id, 'CANCEL', 'referrals', referral.id)
     saveDemoDb(db)
     return hydrateDemoReferral(db, referral, true)
   }
-  const { data, error } = await supabase.from('referrals').update({ status: 'cancelled' }).eq('id', id).select(referralFields).single()
+  const { data, error } = await supabase
+    .from('referrals')
+    .update({ status: 'cancelled' })
+    .eq('id', id)
+    .in('status', CANCELLABLE_STATUSES)
+    .select(referralFields)
+    .maybeSingle()
   if (error) throw error
+  if (!data) throw new Error('This referral cannot be cancelled. It may have already ended or been updated.')
   return data
 }
 

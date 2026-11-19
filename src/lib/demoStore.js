@@ -181,6 +181,11 @@ function createInitialData() {
       { user_id: '00000000-0000-4000-9000-000000000001', consent_type: 'share_contact', granted: true, updated_at: daysAgo(30) },
       { user_id: '00000000-0000-4000-9000-000000000001', consent_type: 'share_physical_context', granted: true, updated_at: daysAgo(5) },
       { user_id: '00000000-0000-4000-9000-000000000001', consent_type: 'research_opt_in', granted: true, updated_at: daysAgo(30) },
+      ...['00000000-0000-4000-9000-000000000004', '00000000-0000-4000-9000-000000000005', '00000000-0000-4000-9000-000000000006', '00000000-0000-4000-9000-000000000007'].flatMap(uid => [
+        { user_id: uid, consent_type: 'terms', granted: true, updated_at: daysAgo(20) },
+        { user_id: uid, consent_type: 'retain_history', granted: true, updated_at: daysAgo(20) },
+        { user_id: uid, consent_type: 'research_opt_in', granted: true, updated_at: daysAgo(20) },
+      ]),
       ...['00000000-0000-4000-9000-000000000002', '00000000-0000-4000-9000-000000000003', '00000000-0000-4000-9000-000000000008', '00000000-0000-4000-9000-000000000009', '00000000-0000-4000-9000-000000000010'].map(uid => ({
         user_id: uid, consent_type: 'terms', granted: true, updated_at: daysAgo(60),
       })),
@@ -586,6 +591,13 @@ export function loadDemoDb() {
     if (raw) {
       const parsed = JSON.parse(raw)
       if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.support_services)) {
+        if (Array.isArray(parsed.consents)) {
+          ['00000000-0000-4000-9000-000000000004', '00000000-0000-4000-9000-000000000005', '00000000-0000-4000-9000-000000000006', '00000000-0000-4000-9000-000000000007'].forEach(uid => {
+            if (!parsed.consents.some(c => c.user_id === uid && c.consent_type === 'research_opt_in')) {
+              parsed.consents.push({ user_id: uid, consent_type: 'research_opt_in', granted: true, updated_at: daysAgo(20) })
+            }
+          })
+        }
         memoryDb = parsed
         return memoryDb
       }

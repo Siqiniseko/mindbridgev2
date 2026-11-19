@@ -16,10 +16,11 @@ import SafetyPanel from '../components/SafetyPanel'
 const DRAFT_PREFIX = 'mindbridge_assessment_draft_'
 
 export default function Assessment() {
-  const { user } = useAuth()
+  const { user, consents } = useAuth()
   const { lang } = useI18n()
   const isAr = lang === 'ar'
   const draftKey = `${DRAFT_PREFIX}${user.id}`
+  const retainHistory = consents.retain_history !== false
 
   const [savedDraft, setSavedDraft] = useState(() => {
     try {
@@ -109,9 +110,10 @@ export default function Assessment() {
       const saved = await saveAssessment(user.id, instrumentId, answers, {
         functioning,
         optInSignals,
+        retainHistory,
       })
       clearDraft()
-      navigate(`/results/${saved.id}`)
+      navigate(`/results/${saved.id}`, saved.ephemeral ? { state: { ephemeralResult: saved } } : undefined)
     } catch (err) {
       setError(err.message || 'Unable to save your assessment. Please try again.')
     } finally {
@@ -132,6 +134,14 @@ export default function Assessment() {
           ? 'المشاركة طوعية تماماً. تعكس هذه الأدوات تجربتك مؤخراً ولا تُعد تشخيصاً طبياً. يمكنك الحفظ والمتابعة لاحقاً في أي وقت.'
           : 'Participation is voluntary. These validated instruments help recognise mood, anxiety, stress, and general wellbeing changes over time; they do not provide a diagnosis.'}
       </p>
+
+      {!retainHistory && (
+        <p className="notice" role="status">
+          {isAr
+            ? 'خيار حفظ السجل متوقف حالياً في الخصوصية: ستظهر نتيجتك لهذه الجلسة فقط ولن تُحفظ في سجلك طويل الأمد.'
+            : 'History retention is currently Off in Privacy: your result will be calculated for this session only and will not be saved to long-term history.'}
+        </p>
+      )}
 
       {showImmediateSafety && <SafetyPanel inlineWarning />}
 

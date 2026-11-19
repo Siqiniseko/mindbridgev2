@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 import { useAuth } from '../context/auth'
 import { useI18n } from '../context/i18n'
 import { getAssessment, listAssessments } from '../services/assessmentService'
@@ -18,6 +18,8 @@ import Button from '../components/Button'
 
 export default function Results() {
   const { id } = useParams()
+  const location = useLocation()
+  const ephemeralResult = id === 'ephemeral' ? location.state?.ephemeralResult : null
   const { user } = useAuth()
   const { lang, formatDate } = useI18n()
   const isAr = lang === 'ar'
@@ -26,6 +28,15 @@ export default function Results() {
 
   useEffect(() => {
     let active = true
+    if (id === 'ephemeral') {
+      const score = ephemeralResult ? scoreAssessment(ephemeralResult.instrument, ephemeralResult.answers) : null
+      Promise.resolve().then(() => {
+        if (active) setState({ id, userId: user.id, row: ephemeralResult || null, score, previous: null })
+      })
+      return () => {
+        active = false
+      }
+    }
     Promise.all([getAssessment(user.id, id), listAssessments(user.id)])
       .then(([row, history]) => {
         const score = row ? scoreAssessment(row.instrument, row.answers) : null
@@ -45,7 +56,7 @@ export default function Results() {
     return () => {
       active = false
     }
-  }, [id, user.id, attempt])
+  }, [id, user.id, attempt, ephemeralResult])
 
   if (!state || state.id !== id || state.userId !== user.id) return <p role="status">Loading your result…</p>
   if (state.error) {
@@ -60,9 +71,16 @@ export default function Results() {
   if (!state.row) {
     return (
       <section className="page-intro">
-        <h1>Result not found</h1>
-        <p>This result does not exist or is not available to your account.</p>
-        <Link to="/dashboard">Back to dashboard</Link>
+        <h1>{id === 'ephemeral' ? 'Session-only result cleared' : 'Result not found'}</h1>
+        <p>
+          {id === 'ephemeral'
+            ? 'Because history retention was turned off, this result was displayed only for that session and was not saved. Take a new check-in or enable history retention in Privacy.'
+            : 'This result does not exist or is not available to your account.'}
+        </p>
+        <div className="actions">
+          <Link className="button" to="/assessment">Take an assessment</Link>
+          <Link className="button button-secondary" to="/privacy">Privacy settings</Link>
+        </div>
       </section>
     )
   }
@@ -84,6 +102,14 @@ export default function Results() {
       </h1>
 
       <div className="card">
+        {row.ephemeral && (
+          <p className="notice" role="status">
+            <strong>{isAr ? 'نتيجة لهذه الجلسة فقط:' : 'Session-only result (not stored in long-term history):'}</strong>{' '}
+            {isAr
+              ? 'بناءً على اختيارك في إعدادات الخصوصية، لم يتم حفظ هذا التقييم في السجل.'
+              : 'Because "Retain personal assessment history" is off in Privacy, this check-in was not saved to your account.'}
+          </p>
+        )}
         <p className="result-score">
           {score.total}
           <span> / {instrument.max}</span>

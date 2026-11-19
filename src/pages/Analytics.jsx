@@ -54,7 +54,7 @@ export default function Analytics() {
       <p className="eyebrow">DE-IDENTIFIED POPULATION HEALTH ANALYTICS</p>
       <h1>Outcomes, fairness &amp; safety monitoring</h1>
       <p>
-        Aggregated, strictly de-identified metrics. The Population Health Analyst role never accesses individual clinical records. Subgroups with fewer than {SMALL_CELL_THRESHOLD} individuals are suppressed to prevent re-identification.
+        Aggregated, strictly de-identified metrics. The Population Health Analyst role never accesses individual clinical records. Only individuals with active <strong>research opt-in</strong> consent are included{data ? ` (${data.optedInCount} opted-in individuals)` : ''}, and subgroups with fewer than {SMALL_CELL_THRESHOLD} individuals are suppressed to prevent re-identification.
       </p>
 
       <div className="actions">

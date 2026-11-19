@@ -13,6 +13,19 @@ const ROLE_DESTINATIONS = {
   analyst: '/analytics',
 }
 
+function readAuthCallbackError() {
+  if (typeof window === 'undefined') return ''
+  const searchParams = new URLSearchParams(window.location.search)
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+  return (
+    hashParams.get('error_description') ||
+    searchParams.get('error_description') ||
+    hashParams.get('error') ||
+    searchParams.get('error') ||
+    ''
+  )
+}
+
 export default function AuthForm({ register = false }) {
   const {
     session,
@@ -24,17 +37,19 @@ export default function AuthForm({ register = false }) {
     signIn,
     signUp,
     sendMagicLink,
+    resendConfirmation,
     demoSignIn,
     resetPassword,
     updateRecoveryPassword,
   } = useAuth()
   const { lang } = useI18n()
   const isAr = lang === 'ar'
-  const [error, setError] = useState('')
+  const [error, setError] = useState(() => readAuthCallbackError())
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [showReset, setShowReset] = useState(false)
-  const [magicEmail, setMagicEmail] = useState('')
+  const [canResendConfirmation, setCanResendConfirmation] = useState(false)
+  const [emailInput, setEmailInput] = useState('')
   const navigate = useNavigate()
 
   if (!loading && session && !passwordRecovery) {
@@ -70,6 +85,7 @@ export default function AuthForm({ register = false }) {
     event.preventDefault()
     setError('')
     setMessage('')
+    setCanResendConfirmation(false)
     const form = new FormData(event.currentTarget)
     const email = form.get('email').trim()
     const password = form.get('password')
@@ -89,13 +105,19 @@ export default function AuthForm({ register = false }) {
       if (data?.session) {
         const nextRole = data.role || data.user?.user_metadata?.role || role
         navigate(register ? '/consent' : ROLE_DESTINATIONS[nextRole] || '/dashboard', { replace: true })
+      } else if (register && data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        setError('An account with this email already exists. Try logging in or resetting your password.')
       } else {
+        setCanResendConfirmation(true)
         setMessage('Account created! Check your email inbox and click the confirmation link before logging in.')
       }
     } catch (err) {
       const msg = err.message || 'We could not connect. Please try again.'
       if (/secret API key/i.test(msg)) {
         setError('Supabase rejected VITE_SUPABASE_ANON_KEY because a secret/service_role key was used instead of the public Publishable / anon key. Replace VITE_SUPABASE_ANON_KEY with your sb_publishable_... (or anon) key and rotate the secret key in Supabase.')
+      } else if (/email not confirmed/i.test(msg)) {
+        setCanResendConfirmation(true)
+        setError('Your email address has not been confirmed yet. Check your inbox or click "Resend confirmation email" below.')
       } else {
         setError(msg)
       }
@@ -104,10 +126,29 @@ export default function AuthForm({ register = false }) {
     }
   }
 
+  async function handleResend() {
+    setError('')
+    setMessage('')
+    const email = emailInput.trim()
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return setError('Enter your email address above first.')
+    }
+    setBusy(true)
+    try {
+      const { error: resendErr } = await resendConfirmation(email)
+      if (resendErr) throw resendErr
+      setMessage(`Confirmation email resent to ${email}. Open the link in your email to activate your account.`)
+    } catch (err) {
+      setError(err.message || 'Unable to resend confirmation email.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function handleMagicLink() {
     setError('')
     setMessage('')
-    const email = magicEmail.trim()
+    const email = emailInput.trim()
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return setError('Enter your email address above first to receive a magic sign-in link.')
     }
@@ -170,9 +211,9 @@ export default function AuthForm({ register = false }) {
   if (passwordRecovery) {
     return (
       <section className="auth-card card">
-        <p className="eyebrow">ACCOUNT RECOVERY</p>
+        <p className="eyebrow">Account recovery</p>
         <h1>Set a new password</h1>
-        <p>Enter a new password (at least 8 characters) to finish recovering your Supabase account.</p>
+        <p>Enter a new password (at least 8 characters) to finish recovering your account.</p>
         <form onSubmit={submitRecoveryUpdate} noValidate>
           <label>
             New password
@@ -197,7 +238,7 @@ export default function AuthForm({ register = false }) {
 
   return (
     <section className="auth-card card">
-      <p className="eyebrow">{isAr ? 'خطوة آمنة لرفاهك' : 'A SMALL STEP FOR YOURSELF'}</p>
+      <p className="eyebrow">{isAr ? 'خطوة آمنة لرفاهك' : 'A small step for yourself'}</p>
       <h1>{register ? (isAr ? 'إنشاء حساب جديد' : 'Create your MindBridge AI account') : isAr ? 'مرحباً بعودتك' : 'Welcome back'}</h1>
       <p>
         {register
@@ -215,15 +256,9 @@ export default function AuthForm({ register = false }) {
         </p>
       )}
 
-      {!demoMode && (
-        <p className="notice" role="status">
-          <strong>Live Supabase authentication connected.</strong> Sign in with your registered email and password, request a magic link, or create a new account.
-        </p>
-      )}
-
       {demoMode && (
         <div className="notice" role="status">
-          <strong>{isAr ? 'دخول فوري للأدوار الستة (بدون كلمة مرور)' : 'One-click role login (no password needed · synthetic demo data)'}</strong>
+          <strong>{isAr ? 'دخول فوري للأدوار الستة (بيانات تجريبية)' : 'Preview role workspaces (synthetic demo data)'}</strong>
           <div className="actions demo-actions">
             <Button className="button-secondary" disabled={busy} onClick={() => quickLogin('individual')}>
               Individual (Amira)
@@ -246,7 +281,7 @@ export default function AuthForm({ register = false }) {
           </div>
           {!register && (
             <p className="muted">
-              Demo email login password: <code>password123</code> (e.g., <code>amira@mindbridge.demo</code>, <code>dr.tariq@mindbridge.demo</code>, <code>dr.nadia@mindbridge.demo</code>, <code>coordinator@mindbridge.demo</code>, <code>admin@mindbridge.demo</code>, <code>analyst@mindbridge.demo</code>). Or <Link to="/register">register</Link> any email in this browser.
+              Demo password: <code>password123</code> (e.g., <code>amira@mindbridge.demo</code>, <code>dr.tariq@mindbridge.demo</code>). Live Supabase sign-in activates automatically once <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> are configured in your deployment environment.
             </p>
           )}
         </div>
@@ -267,8 +302,8 @@ export default function AuthForm({ register = false }) {
               type="email"
               autoComplete="email"
               required
-              value={magicEmail}
-              onChange={e => setMagicEmail(e.target.value)}
+              value={emailInput}
+              onChange={e => setEmailInput(e.target.value)}
             />
           </label>
           <label>
@@ -310,13 +345,18 @@ export default function AuthForm({ register = false }) {
                 Email magic link
               </Button>
             )}
+            {!demoMode && canResendConfirmation && (
+              <Button className="button-secondary" disabled={busy || loading} onClick={handleResend}>
+                Resend confirmation email
+              </Button>
+            )}
           </div>
         </form>
       ) : (
         <form onSubmit={submitReset} noValidate>
           <label>
             Account email
-            <input name="resetEmail" type="email" required />
+            <input name="resetEmail" type="email" required defaultValue={emailInput} />
           </label>
           {demoMode && (
             <label>

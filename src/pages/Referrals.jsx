@@ -13,6 +13,8 @@ import {
   submitReferralFeedback,
 } from '../services/referralService'
 import { listServices, TIERS } from '../services/supportService'
+import { getAssessment, listAssessments } from '../services/assessmentService'
+import { hasSelfHarmResponse } from '../data/instruments'
 import Button from '../components/Button'
 import ReferralProgress from '../components/ReferralProgress'
 import SafetyPanel from '../components/SafetyPanel'
@@ -159,7 +161,14 @@ export default function Referrals() {
         })
       )
     }
-    Promise.allSettled([loadReferrals(), listServices()]).then(([referrals, services]) => {
+    async function loadRecentUrgency() {
+      const rows = await listAssessments(user.id)
+      const latestPhq = rows.find(r => r.instrument === 'PHQ9')
+      if (!latestPhq) return false
+      const full = Array.isArray(latestPhq.answers) ? latestPhq : await getAssessment(user.id, latestPhq.id).catch(() => null)
+      return full ? hasSelfHarmResponse('PHQ9', full.answers) : false
+    }
+    Promise.allSettled([loadReferrals(), listServices(), loadRecentUrgency()]).then(([referrals, services, recentUrgentRes]) => {
       if (active) {
         setState({
           userId: user.id,
@@ -167,6 +176,7 @@ export default function Referrals() {
           referralsError: referrals.status === 'rejected' ? referrals.reason.message || 'Unable to load referrals.' : '',
           services: services.status === 'fulfilled' ? services.value : [],
           servicesError: services.status === 'rejected' ? services.reason.message || 'Unable to load service listings.' : '',
+          recentUrgent: recentUrgentRes.status === 'fulfilled' ? Boolean(recentUrgentRes.value) : false,
         })
       }
     })
@@ -209,16 +219,17 @@ export default function Referrals() {
   }
 
   if (state?.userId !== user.id) return <p role="status">Loading your referrals &amp; appointments…</p>
+  const effectiveUrgent = urgentRequested || state.recentUrgent
   const selected = state.services.find(service => service.id === serviceId)
   const urgentFallbackService =
     state.services.find(s => s.tier === 'urgent_emergency') ||
     state.services.find(s => s.tier === 'specialist') ||
     state.services[0]
-  const activeServiceForForm = selected || (urgentRequested ? urgentFallbackService : null)
+  const activeServiceForForm = selected || (effectiveUrgent ? urgentFallbackService : null)
 
   return (
     <section className="dashboard-page">
-      {urgentRequested && <SafetyPanel />}
+      {effectiveUrgent && <SafetyPanel />}
       <p className="eyebrow">SUPPORT THAT FOLLOWS THROUGH</p>
       <h1>Referrals, appointments &amp; follow-up</h1>
       <p>
@@ -232,9 +243,9 @@ export default function Referrals() {
       )}
       {activeServiceForForm ? (
         <RequestForm
-          key={`${user.id}-${activeServiceForForm.id}-${urgentRequested}`}
+          key={`${user.id}-${activeServiceForForm.id}-${effectiveUrgent}`}
           service={activeServiceForForm}
-          initialUrgent={urgentRequested}
+          initialUrgent={effectiveUrgent}
           onCreated={() => setAttempt(previous => previous + 1)}
         />
       ) : (

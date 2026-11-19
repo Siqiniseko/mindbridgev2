@@ -36,6 +36,30 @@ function fallbackProfileFromSession(session) {
   }
 }
 
+async function fetchOrProvisionProfile(session) {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select(PROFILE_FIELDS)
+    .eq('id', session.user.id)
+    .maybeSingle()
+  if (error) throw error
+  if (data) return data
+
+  const seed = {
+    id: session.user.id,
+    email: session.user.email || null,
+    full_name: session.user.user_metadata?.full_name || null,
+    role: 'individual',
+  }
+  const { data: created, error: insertError } = await supabase
+    .from('profiles')
+    .upsert(seed, { onConflict: 'id' })
+    .select(PROFILE_FIELDS)
+    .maybeSingle()
+  if (!insertError && created) return created
+  return fallbackProfileFromSession(session)
+}
+
 function loadDemoProfileState(userId) {
   if (!userId) return { session: null, profile: null, role: 'individual', loading: false, profileError: '' }
   const db = loadDemoDb()
@@ -70,10 +94,16 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     let active = true
     const request = userId ? loadConsents(userId) : Promise.resolve({ userId: null, values: {}, dates: {}, error: '' })
-    request.then(state => { if (active) setConsentState(state) }).catch(error => {
-      if (active) setConsentState({ userId, values: {}, dates: {}, error: error.message || 'Unable to load your consent preferences.' })
-    })
-    return () => { active = false }
+    request
+      .then(state => {
+        if (active) setConsentState(state)
+      })
+      .catch(error => {
+        if (active) setConsentState({ userId, values: {}, dates: {}, error: error.message || 'Unable to load your consent preferences.' })
+      })
+    return () => {
+      active = false
+    }
   }, [userId])
 
   const refreshConsents = useCallback(async () => {
@@ -98,12 +128,17 @@ export function AuthProvider({ children }) {
     let revision = 0
     async function updateSession(session) {
       const current = ++revision
-      setAuth({ session, profile: null, role: 'individual', loading: Boolean(session), profileError: '' })
-      if (!session) return
+      if (!session) {
+        setAuth({ session: null, profile: null, role: 'individual', loading: false, profileError: '' })
+        return
+      }
+      setAuth(prev =>
+        prev.session?.user.id === session.user.id && prev.profile
+          ? { ...prev, session, loading: false }
+          : { session, profile: null, role: 'individual', loading: true, profileError: '' }
+      )
       try {
-        const { data, error } = await supabase.from('profiles').select(PROFILE_FIELDS).eq('id', session.user.id).maybeSingle()
-        if (error) throw error
-        const profile = data || fallbackProfileFromSession(session)
+        const profile = await fetchOrProvisionProfile(session)
         if (active && current === revision) {
           setAuth({ session, profile, role: profile.role || 'individual', loading: false, profileError: '' })
         }
@@ -122,18 +157,29 @@ export function AuthProvider({ children }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'PASSWORD_RECOVERY') setPasswordRecovery(true)
       if (event === 'SIGNED_OUT') setPasswordRecovery(false)
-      setTimeout(() => { if (active) void updateSession(session) }, 0)
+      setTimeout(() => {
+        if (active) void updateSession(session)
+      }, 0)
     })
     const initialRevision = revision
-    supabase.auth.getSession().then(({ data, error }) => {
-      if (active && revision === initialRevision) {
-        if (error) setAuth(previous => ({ ...previous, loading: false, profileError: error.message }))
-        else void updateSession(data.session)
-      }
-    }).catch(() => {
-      if (active && revision === initialRevision) setAuth(previous => ({ ...previous, loading: false, profileError: 'Unable to restore your session. Please sign in again.' }))
-    })
-    return () => { active = false; revision++; subscription.unsubscribe() }
+    supabase.auth
+      .getSession()
+      .then(({ data, error }) => {
+        if (active && revision === initialRevision) {
+          if (error) setAuth(previous => ({ ...previous, loading: false, profileError: error.message }))
+          else void updateSession(data.session)
+        }
+      })
+      .catch(() => {
+        if (active && revision === initialRevision) {
+          setAuth(previous => ({ ...previous, loading: false, profileError: 'Unable to restore your session. Please sign in again.' }))
+        }
+      })
+    return () => {
+      active = false
+      revision++
+      subscription.unsubscribe()
+    }
   }, [])
 
   async function handleSignUp(email, password, fullName) {
@@ -151,8 +197,16 @@ export function AuthProvider({ children }) {
         data: { full_name: fullName.trim() },
       },
     })
-    if (!res.error && res.data?.session?.user) {
-      res.data.role = 'individual'
+    if (!res.error && res.data?.session) {
+      try {
+        const profile = await fetchOrProvisionProfile(res.data.session)
+        setAuth({ session: res.data.session, profile, role: profile.role || 'individual', loading: false, profileError: '' })
+        res.data.role = profile.role || 'individual'
+      } catch {
+        const fallback = fallbackProfileFromSession(res.data.session)
+        setAuth({ session: res.data.session, profile: fallback, role: 'individual', loading: false, profileError: '' })
+        res.data.role = 'individual'
+      }
     }
     return res
   }
@@ -164,9 +218,16 @@ export function AuthProvider({ children }) {
       return result
     }
     const res = await supabase.auth.signInWithPassword({ email: email.trim(), password })
-    if (!res.error && res.data?.user) {
-      const { data: prof } = await supabase.from('profiles').select('role').eq('id', res.data.user.id).maybeSingle()
-      res.data.role = prof?.role || 'individual'
+    if (!res.error && res.data?.session) {
+      try {
+        const profile = await fetchOrProvisionProfile(res.data.session)
+        setAuth({ session: res.data.session, profile, role: profile.role || 'individual', loading: false, profileError: '' })
+        res.data.role = profile.role || 'individual'
+      } catch {
+        const fallback = fallbackProfileFromSession(res.data.session)
+        setAuth({ session: res.data.session, profile: fallback, role: 'individual', loading: false, profileError: '' })
+        res.data.role = 'individual'
+      }
     }
     return res
   }
@@ -177,6 +238,18 @@ export function AuthProvider({ children }) {
     }
     const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined
     return supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: redirectTo },
+    })
+  }
+
+  async function handleResendConfirmation(email) {
+    if (!supabase) {
+      return { error: { message: 'Email confirmation is only required when connected to Supabase.' } }
+    }
+    const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined
+    return supabase.auth.resend({
+      type: 'signup',
       email: email.trim(),
       options: { emailRedirectTo: redirectTo },
     })
@@ -214,7 +287,12 @@ export function AuthProvider({ children }) {
       setConsentState({ userId: null, values: {}, dates: {}, error: '' })
       return result
     }
-    return supabase.auth.signOut()
+    const result = await supabase.auth.signOut()
+    if (!result.error) {
+      setAuth({ session: null, profile: null, role: 'individual', loading: false, profileError: '' })
+      setConsentState({ userId: null, values: {}, dates: {}, error: '' })
+    }
+    return result
   }
 
   const value = {
@@ -233,6 +311,7 @@ export function AuthProvider({ children }) {
     signUp: handleSignUp,
     signIn: handleSignIn,
     sendMagicLink: handleMagicLink,
+    resendConfirmation: handleResendConfirmation,
     demoSignIn: handleDemoRoleSignIn,
     resetPassword: handleResetPassword,
     updateRecoveryPassword: handleUpdateRecoveryPassword,

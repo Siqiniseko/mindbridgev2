@@ -322,10 +322,12 @@ alter table public.audit_logs enable row level security;
 -- Row-Level Security Policies
 drop policy if exists profiles_read on public.profiles;
 create policy profiles_read on public.profiles for select to authenticated using (
-  id = auth.uid() or public.app_role() in ('admin','analyst') or
+  id = auth.uid() or public.app_role() = 'admin' or
   (public.app_role() in ('professional','coordinator') and exists (select 1 from public.referrals r where r.user_id = profiles.id and (r.professional_id = auth.uid() or public.app_role() = 'coordinator') and r.share_contact)) or
   (public.app_role() = 'primary_care' and exists (select 1 from public.referrals r where r.user_id = profiles.id and r.share_physical_context))
 );
+drop policy if exists profiles_insert on public.profiles;
+create policy profiles_insert on public.profiles for insert to authenticated with check (id = auth.uid() and role = 'individual');
 drop policy if exists profiles_update on public.profiles;
 create policy profiles_update on public.profiles for update to authenticated using (id = auth.uid() or public.app_role() = 'admin') with check (id = auth.uid() or public.app_role() = 'admin');
 
@@ -336,7 +338,7 @@ create policy consents_admin_read on public.consents for select to authenticated
 
 drop policy if exists assessments_read on public.assessments;
 create policy assessments_read on public.assessments for select to authenticated using (
-  user_id = auth.uid() or public.app_role() in ('admin','analyst') or
+  user_id = auth.uid() or public.app_role() = 'admin' or
   (public.app_role() = 'professional' and exists (select 1 from public.referrals r where r.user_id = assessments.user_id and r.professional_id = auth.uid() and r.share_results)) or
   (public.app_role() = 'primary_care' and exists (select 1 from public.referrals r where r.user_id = assessments.user_id and r.share_physical_context and r.share_results))
 );
@@ -352,7 +354,7 @@ create policy services_admin on public.support_services for all to authenticated
 
 drop policy if exists referrals_read on public.referrals;
 create policy referrals_read on public.referrals for select to authenticated using (
-  user_id = auth.uid() or public.app_role() in ('admin','coordinator','analyst') or
+  user_id = auth.uid() or public.app_role() in ('admin','coordinator') or
   (professional_id = auth.uid() and public.app_role() = 'professional') or
   (share_physical_context and public.app_role() = 'primary_care')
 );
@@ -375,7 +377,7 @@ create policy referrals_delete on public.referrals for delete to authenticated u
 
 drop policy if exists follow_ups_read on public.follow_ups;
 create policy follow_ups_read on public.follow_ups for select to authenticated using (
-  public.app_role() in ('admin','coordinator','analyst') or exists (
+  public.app_role() in ('admin','coordinator') or exists (
     select 1 from public.referrals r where r.id = follow_ups.referral_id and (
       r.user_id = auth.uid() or
       (r.professional_id = auth.uid() and public.app_role() = 'professional') or
@@ -402,19 +404,298 @@ create policy adverse_insert on public.adverse_events for insert to authenticate
 );
 drop policy if exists adverse_update on public.adverse_events;
 create policy adverse_update on public.adverse_events for update to authenticated using (
-  public.app_role() in ('admin','analyst')
+  public.app_role() = 'admin'
 ) with check (
-  public.app_role() in ('admin','analyst')
+  public.app_role() = 'admin'
 );
 
 drop policy if exists audit_admin_read on public.audit_logs;
 create policy audit_admin_read on public.audit_logs for select to authenticated using (public.app_role() = 'admin');
 
+-- Server-side De-identified Outcome, Safety & Fairness RPC (research_opt_in + n < 3 suppression)
+create or replace function public.get_outcome_and_safety_metrics(date_range_days integer default 30)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  cutoff timestamptz;
+  small_cell constant integer := 3;
+  opted_in_count integer;
+  total_assessments integer;
+  positive_screens integer;
+  converted_count integer;
+  conversion_rate integer;
+  non_cancelled integer;
+  completed_refs integer;
+  referral_completion_rate integer;
+  scheduled_or_attended integer;
+  attended_count integer;
+  attendance_rate integer;
+  avg_wait numeric;
+  median_wait numeric;
+  timely_count integer;
+  sla_compliance_rate integer;
+  repeat_pairs integer;
+  improved_pairs integer;
+  improved_followups integer;
+  total_evaluated integer;
+  improvement_rate integer;
+  crisis_total integer;
+  crisis_completed integer;
+  crisis_completion_rate integer;
+  service_utilisation jsonb;
+  equity_json jsonb;
+  alerts_json jsonb;
+  adverse_json jsonb;
+begin
+  if public.app_role() not in ('admin', 'analyst') then
+    raise exception 'Unauthorized analytics access' using errcode = '42501';
+  end if;
+
+  cutoff := case when coalesce(date_range_days, 0) > 0 then now() - make_interval(days => date_range_days) else '-infinity'::timestamptz end;
+
+  with opted_individuals as (
+    select p.id, p.equity
+    from public.profiles p
+    where p.role = 'individual'
+      and exists (
+        select 1 from public.consents c
+        where c.user_id = p.id and c.consent_type = 'research_opt_in' and c.granted = true
+      )
+  ),
+  filt_assessments as (
+    select a.* from public.assessments a
+    join opted_individuals oi on oi.id = a.user_id
+    where a.created_at >= cutoff
+  ),
+  filt_referrals as (
+    select r.*, s.tier as service_tier
+    from public.referrals r
+    join opted_individuals oi on oi.id = r.user_id
+    left join public.support_services s on s.id = r.service_id
+    where r.created_at >= cutoff
+  ),
+  filt_followups as (
+    select f.* from public.follow_ups f
+    join filt_referrals r on r.id = f.referral_id
+    where f.created_at >= cutoff
+  ),
+  positive_users as (
+    select distinct user_id from filt_assessments
+    where severity in ('moderate', 'moderately severe', 'severe')
+       or (instrument = 'PHQ9' and coalesce((answers->>8)::int, 0) > 0)
+  ),
+  converted_users as (
+    select distinct user_id from filt_referrals
+    where status in ('accepted','professional_review','appointment_scheduled','appointment_attended','follow_up_completed','escalated')
+  ),
+  non_canc as (
+    select * from filt_referrals where status <> 'cancelled'
+  ),
+  waits as (
+    select greatest(0, extract(epoch from (first_response_at - created_at)) / 3600.0) as hrs
+    from non_canc where first_response_at is not null
+  ),
+  series_pairs as (
+    select user_id, instrument,
+      (array_agg(total_score order by created_at asc))[1] as first_score,
+      (array_agg(total_score order by created_at desc))[1] as last_score,
+      count(*) as cnt
+    from filt_assessments
+    group by user_id, instrument
+    having count(*) >= 2
+  )
+  select
+    (select count(*) from opted_individuals),
+    (select count(*) from filt_assessments),
+    (select count(*) from positive_users),
+    (select count(*) from positive_users p where exists (select 1 from converted_users c where c.user_id = p.user_id)),
+    (select count(*) from non_canc),
+    (select count(*) from non_canc where status = 'follow_up_completed'),
+    (select count(*) from non_canc where appointment_at is not null or status in ('appointment_attended','follow_up_completed')),
+    (select count(*) from non_canc where attendance_status = 'attended' or status in ('appointment_attended','follow_up_completed')),
+    coalesce((select round(avg(hrs)::numeric, 1) from waits), 0),
+    coalesce((select round((percentile_cont(0.5) within group (order by hrs))::numeric, 1) from waits), 0),
+    (select count(*) from non_canc where
+      case when first_response_at is null
+        then extract(epoch from (now() - created_at)) / 3600.0 <= case when priority = 'urgent' or crisis_flagged then 24 else 168 end
+        else extract(epoch from (first_response_at - created_at)) / 3600.0 <= case when priority = 'urgent' or crisis_flagged then 24 else 168 end
+      end),
+    (select count(*) from series_pairs),
+    (select count(*) from series_pairs where case when instrument = 'WHO5' then last_score > first_score else last_score < first_score end),
+    (select count(*) from filt_followups where outcome_status = 'improved'),
+    (select count(*) from filt_followups where outcome_status is not null),
+    (select count(*) from filt_referrals where crisis_flagged or priority = 'urgent' or status = 'escalated'),
+    (select count(*) from filt_referrals where (crisis_flagged or priority = 'urgent' or status = 'escalated') and crisis_completed_at is not null)
+  into
+    opted_in_count, total_assessments, positive_screens, converted_count,
+    non_cancelled, completed_refs, scheduled_or_attended, attended_count,
+    avg_wait, median_wait, timely_count,
+    repeat_pairs, improved_pairs, improved_followups, total_evaluated,
+    crisis_total, crisis_completed;
+
+  conversion_rate := case when positive_screens > 0 then round((converted_count::numeric / positive_screens) * 100) else 0 end;
+  referral_completion_rate := case when non_cancelled > 0 then round((completed_refs::numeric / non_cancelled) * 100) else 0 end;
+  attendance_rate := case when scheduled_or_attended > 0 then round((attended_count::numeric / scheduled_or_attended) * 100) else 0 end;
+  sla_compliance_rate := case when non_cancelled > 0 then round((timely_count::numeric / non_cancelled) * 100) else 100 end;
+  total_evaluated := repeat_pairs + total_evaluated;
+  improvement_rate := case when total_evaluated > 0 then round(((improved_pairs + improved_followups)::numeric / total_evaluated) * 100) else 0 end;
+  crisis_completion_rate := case when crisis_total > 0 then round((crisis_completed::numeric / crisis_total) * 100) else 100 end;
+
+  with opted_individuals as (
+    select p.id from public.profiles p
+    where p.role = 'individual'
+      and exists (select 1 from public.consents c where c.user_id = p.id and c.consent_type = 'research_opt_in' and c.granted = true)
+  ),
+  tiers(id, label, sort_order) as (
+    values
+      ('self_help', 'Self-help & wellbeing education', 1),
+      ('community', 'Community support', 2),
+      ('primary_care', 'Primary healthcare', 3),
+      ('tele_mental_health', 'Tele-mental health', 4),
+      ('specialist', 'Specialist mental healthcare', 5),
+      ('urgent_emergency', 'Urgent & emergency assistance', 6)
+  ),
+  non_canc as (
+    select r.*, s.tier as service_tier
+    from public.referrals r
+    join opted_individuals oi on oi.id = r.user_id
+    left join public.support_services s on s.id = r.service_id
+    where r.created_at >= cutoff and r.status <> 'cancelled'
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'tier', t.label,
+    'count', coalesce((select count(*) from non_canc nc where nc.service_tier = t.id), 0)
+  ) order by t.sort_order), '[]'::jsonb)
+  into service_utilisation
+  from tiers t;
+
+  with opted_individuals as (
+    select p.id, p.equity from public.profiles p
+    where p.role = 'individual'
+      and exists (select 1 from public.consents c where c.user_id = p.id and c.consent_type = 'research_opt_in' and c.granted = true)
+  ),
+  pos_u as (
+    select distinct a.user_id from public.assessments a
+    join opted_individuals oi on oi.id = a.user_id
+    where a.created_at >= cutoff
+      and (a.severity in ('moderate', 'moderately severe', 'severe') or (a.instrument = 'PHQ9' and coalesce((a.answers->>8)::int, 0) > 0))
+  ),
+  conv_u as (
+    select distinct r.user_id from public.referrals r
+    join opted_individuals oi on oi.id = r.user_id
+    where r.created_at >= cutoff
+      and r.status in ('accepted','professional_review','appointment_scheduled','appointment_attended','follow_up_completed','escalated')
+  ),
+  dims as (
+    select d.dim, coalesce(nullif(oi.equity->>d.dim, ''), 'Not specified') as grp,
+      oi.id as user_id,
+      exists (select 1 from pos_u p where p.user_id = oi.id) as is_pos,
+      exists (select 1 from conv_u c where c.user_id = oi.id) as is_conv,
+      (select avg(greatest(0, extract(epoch from (r.first_response_at - r.created_at)) / 3600.0))
+       from public.referrals r where r.user_id = oi.id and r.created_at >= cutoff and r.status <> 'cancelled' and r.first_response_at is not null) as avg_user_wait
+    from opted_individuals oi
+    cross join (values ('age_group'), ('gender'), ('nationality_group'), ('language'), ('geography')) as d(dim)
+  ),
+  grouped as (
+    select dim, grp,
+      count(*) as individuals,
+      count(*) filter (where is_pos) as pos_screens,
+      count(*) filter (where is_conv) as handoffs,
+      round(avg(avg_user_wait)::numeric, 1) as avg_wait
+    from dims
+    group by dim, grp
+  ),
+  formatted as (
+    select dim,
+      jsonb_agg(
+        case when individuals < small_cell then
+          jsonb_build_object(
+            'group', grp, 'suppressed', true,
+            'individuals', null, 'positiveScreens', null, 'handoffs', null, 'conversionRate', null, 'avgWaitHours', null
+          )
+        else
+          jsonb_build_object(
+            'group', grp, 'suppressed', false,
+            'individuals', individuals,
+            'positiveScreens', pos_screens,
+            'handoffs', handoffs,
+            'conversionRate', case when pos_screens > 0 then round((handoffs::numeric / pos_screens) * 100) else 0 end,
+            'avgWaitHours', avg_wait
+          )
+        end order by grp
+      ) as rows
+    from grouped
+    group by dim
+  )
+  select
+    jsonb_build_object(
+      'age_group', coalesce((select rows from formatted where dim = 'age_group'), '[]'::jsonb),
+      'gender', coalesce((select rows from formatted where dim = 'gender'), '[]'::jsonb),
+      'nationality_group', coalesce((select rows from formatted where dim = 'nationality_group'), '[]'::jsonb),
+      'language', coalesce((select rows from formatted where dim = 'language'), '[]'::jsonb),
+      'geography', coalesce((select rows from formatted where dim = 'geography'), '[]'::jsonb)
+    )
+  into equity_json;
+
+  with alert_rows as (
+    select dim.key as dim, row_item
+    from jsonb_each(equity_json) as dim(key, val),
+    lateral jsonb_array_elements(dim.val) as row_item
+    where (row_item->>'suppressed')::boolean = false
+  )
+  select coalesce(jsonb_agg(msg), '[]'::jsonb) into alerts_json
+  from (
+    select 'Lower hand-off conversion (' || (row_item->>'conversionRate') || '%) observed in ' || replace(dim, '_', ' ') || ': ' || (row_item->>'group') || '.' as msg
+    from alert_rows where coalesce((row_item->>'positiveScreens')::int, 0) > 0 and coalesce((row_item->>'conversionRate')::int, 100) < 70
+    union all
+    select 'Extended average wait (' || (row_item->>'avgWaitHours') || 'h) observed in ' || replace(dim, '_', ' ') || ': ' || (row_item->>'group') || '.' as msg
+    from alert_rows where row_item->>'avgWaitHours' is not null and (row_item->>'avgWaitHours')::numeric > 48
+  ) sub;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'id', ae.id,
+    'referral_id', ae.referral_id,
+    'category', ae.category,
+    'severity', ae.severity,
+    'summary', ae.summary,
+    'action_taken', ae.action_taken,
+    'status', ae.status,
+    'created_at', ae.created_at
+  ) order by ae.created_at desc), '[]'::jsonb)
+  into adverse_json
+  from public.adverse_events ae;
+
+  return jsonb_build_object(
+    'optedInCount', opted_in_count,
+    'totalAssessments', total_assessments,
+    'positiveScreenCount', positive_screens,
+    'convertedCount', converted_count,
+    'conversionRate', conversion_rate,
+    'referralCompletionRate', referral_completion_rate,
+    'attendanceRate', attendance_rate,
+    'avgWaitHours', avg_wait,
+    'medianWaitHours', median_wait,
+    'slaComplianceRate', sla_compliance_rate,
+    'improvementRate', improvement_rate,
+    'crisisTotal', crisis_total,
+    'crisisCompleted', crisis_completed,
+    'crisisCompletionRate', crisis_completion_rate,
+    'serviceUtilisation', service_utilisation,
+    'adverseEvents', adverse_json,
+    'equity', equity_json,
+    'alerts', alerts_json
+  );
+end $$;
+
 -- Grants
 grant usage on schema public to authenticated;
 revoke all on public.profiles, public.consents, public.assessments, public.support_services,
   public.referrals, public.follow_ups, public.adverse_events, public.audit_logs from public, anon;
-grant select, update on public.profiles to authenticated;
+grant select, insert, update on public.profiles to authenticated;
 grant select, insert, update, delete on public.consents, public.referrals, public.support_services to authenticated;
 grant select, insert, delete on public.assessments to authenticated;
 grant select, insert on public.follow_ups to authenticated;
@@ -423,6 +704,8 @@ revoke all on public.audit_logs from anon, authenticated;
 grant select on public.audit_logs to authenticated;
 revoke all on function public.app_role() from public;
 grant execute on function public.app_role() to authenticated;
+revoke all on function public.get_outcome_and_safety_metrics(integer) from public, anon;
+grant execute on function public.get_outcome_and_safety_metrics(integer) to authenticated;
 revoke all on function public.create_profile(), public.guard_profile_role(), public.guard_referral_update(), public.assign_unassigned_referrals_on_professional_promotion(), public.touch_consent(), public.write_audit_log() from public;
 
 commit;

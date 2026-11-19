@@ -20,7 +20,8 @@ export function filterReferrals(referrals, filter) {
 }
 
 export function allowedStatuses(referral, professionalId) {
-  return referral.user_id === professionalId ? [] : Object.keys(STATUS).filter(status => !['cancelled', 'pending', 'accepted', 'unable_to_contact'].includes(status))
+  if (referral.user_id === professionalId || STATUS[referral.status]?.terminal) return []
+  return Object.keys(STATUS).filter(status => !['cancelled', 'pending', 'accepted', 'unable_to_contact'].includes(status))
 }
 
 function sortClinicianReferrals(referrals) {
@@ -281,7 +282,9 @@ export async function completeCrisisResponse(referralId, professionalId, note) {
 }
 
 export async function addFollowUp(referralId, note, outcome, outcomeStatus = '', authorId = null) {
-  if (!note.trim() && !outcome.trim()) throw new Error('Enter a note or outcome.')
+  const cleanNote = (note ?? '').trim()
+  const cleanOutcome = (outcome ?? '').trim()
+  if (!cleanNote && !cleanOutcome) throw new Error('Enter a note or outcome.')
   if (!supabase) {
     const db = loadDemoDb()
     const now = new Date().toISOString()
@@ -294,8 +297,8 @@ export async function addFollowUp(referralId, note, outcome, outcomeStatus = '',
       id: demoGenerateId('fu'),
       referral_id: referralId,
       author_id: authorId || referral?.professional_id || null,
-      note: note.trim() || null,
-      outcome: outcome.trim() || null,
+      note: cleanNote || null,
+      outcome: cleanOutcome || null,
       outcome_status: outcomeStatus || null,
       created_at: now,
     }
@@ -309,8 +312,8 @@ export async function addFollowUp(referralId, note, outcome, outcomeStatus = '',
     .insert({
       referral_id: referralId,
       author_id: authorId || undefined,
-      note: note.trim() || null,
-      outcome: outcome.trim() || null,
+      note: cleanNote || null,
+      outcome: cleanOutcome || null,
       outcome_status: outcomeStatus || null,
     })
     .select()

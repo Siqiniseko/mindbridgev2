@@ -253,13 +253,22 @@ function buildEquityGroupStats(dimension, users, referrals, positiveScreenUserId
   })
 }
 
-function computeOutcomeDataset({ users, assessments, referrals, followUps, services, adverseEvents, dateRangeDays }) {
-  const cutoff = dateRangeDays > 0 ? Date.now() - dateRangeDays * 24 * 60 * 60 * 1000 : 0
-  const filteredAssessments = assessments.filter(a => Date.parse(a.created_at) >= cutoff)
-  const filteredReferrals = referrals.filter(r => Date.parse(r.created_at) >= cutoff)
-  const filteredFollowUps = followUps.filter(f => Date.parse(f.created_at) >= cutoff)
+function computeOutcomeDataset({ users, consents = [], assessments, referrals, followUps, services, adverseEvents, dateRangeDays }) {
+  const optedInUserIds = new Set(
+    consents
+      .filter(c => c.consent_type === 'research_opt_in' && c.granted === true)
+      .map(c => c.user_id)
+  )
 
-  const individuals = users.filter(u => u.role === 'individual')
+  const individuals = users.filter(u => u.role === 'individual' && optedInUserIds.has(u.id))
+  const consentedIds = new Set(individuals.map(u => u.id))
+
+  const cutoff = dateRangeDays > 0 ? Date.now() - dateRangeDays * 24 * 60 * 60 * 1000 : 0
+  const filteredAssessments = assessments.filter(a => consentedIds.has(a.user_id) && Date.parse(a.created_at) >= cutoff)
+  const filteredReferrals = referrals.filter(r => consentedIds.has(r.user_id) && Date.parse(r.created_at) >= cutoff)
+  const filteredReferralIds = new Set(filteredReferrals.map(r => r.id))
+  const filteredFollowUps = followUps.filter(f => filteredReferralIds.has(f.referral_id) && Date.parse(f.created_at) >= cutoff)
+
   const positiveScreenUserIds = new Set(
     filteredAssessments
       .filter(a => ['moderate', 'moderately severe', 'severe'].includes(a.severity) || (a.instrument === 'PHQ9' && a.answers?.[8] > 0))
@@ -334,11 +343,11 @@ function computeOutcomeDataset({ users, assessments, referrals, followUps, servi
   })
 
   const equity = {
-    age_group: buildEquityGroupStats('age_group', users, filteredReferrals, positiveScreenUserIds),
-    gender: buildEquityGroupStats('gender', users, filteredReferrals, positiveScreenUserIds),
-    nationality_group: buildEquityGroupStats('nationality_group', users, filteredReferrals, positiveScreenUserIds),
-    language: buildEquityGroupStats('language', users, filteredReferrals, positiveScreenUserIds),
-    geography: buildEquityGroupStats('geography', users, filteredReferrals, positiveScreenUserIds),
+    age_group: buildEquityGroupStats('age_group', individuals, filteredReferrals, positiveScreenUserIds),
+    gender: buildEquityGroupStats('gender', individuals, filteredReferrals, positiveScreenUserIds),
+    nationality_group: buildEquityGroupStats('nationality_group', individuals, filteredReferrals, positiveScreenUserIds),
+    language: buildEquityGroupStats('language', individuals, filteredReferrals, positiveScreenUserIds),
+    geography: buildEquityGroupStats('geography', individuals, filteredReferrals, positiveScreenUserIds),
   }
 
   const alerts = []
@@ -354,6 +363,7 @@ function computeOutcomeDataset({ users, assessments, referrals, followUps, servi
   })
 
   return {
+    optedInCount: individuals.length,
     totalAssessments: filteredAssessments.length,
     positiveScreenCount: positiveScreenUserIds.size,
     convertedCount,
@@ -368,7 +378,16 @@ function computeOutcomeDataset({ users, assessments, referrals, followUps, servi
     crisisCompleted,
     crisisCompletionRate,
     serviceUtilisation,
-    adverseEvents: adverseEvents || [],
+    adverseEvents: (adverseEvents || []).map(({ id, referral_id, category, severity, summary, action_taken, status, created_at }) => ({
+      id,
+      referral_id,
+      category,
+      severity,
+      summary,
+      action_taken,
+      status,
+      created_at,
+    })),
     equity,
     alerts,
   }
@@ -379,6 +398,7 @@ export async function getOutcomeAndSafetyMetrics(dateRangeDays = 30) {
     const db = loadDemoDb()
     return computeOutcomeDataset({
       users: db.users,
+      consents: db.consents || [],
       assessments: db.assessments,
       referrals: db.referrals,
       followUps: db.follow_ups,
@@ -388,28 +408,11 @@ export async function getOutcomeAndSafetyMetrics(dateRangeDays = 30) {
     })
   }
 
-  const [usersRes, assessmentsRes, referralsRes, followUpsRes, servicesRes, adverseRes] = await Promise.all([
-    supabase.from('profiles').select('id, role, equity'),
-    supabase.from('assessments').select('user_id, instrument, total_score, severity, answers, created_at'),
-    supabase.from('referrals').select('id, user_id, service_id, status, priority, crisis_flagged, crisis_completed_at, first_response_at, appointment_at, attendance_status, created_at'),
-    supabase.from('follow_ups').select('id, outcome_status, created_at'),
-    supabase.from('support_services').select('id, tier'),
-    supabase.from('adverse_events').select('*').order('created_at', { ascending: false }),
-  ])
-
-  for (const res of [usersRes, assessmentsRes, referralsRes, followUpsRes, servicesRes, adverseRes]) {
-    if (res.error) throw res.error
-  }
-
-  return computeOutcomeDataset({
-    users: usersRes.data || [],
-    assessments: assessmentsRes.data || [],
-    referrals: referralsRes.data || [],
-    followUps: followUpsRes.data || [],
-    services: servicesRes.data || [],
-    adverseEvents: adverseRes.data || [],
-    dateRangeDays,
+  const { data, error } = await supabase.rpc('get_outcome_and_safety_metrics', {
+    date_range_days: dateRangeDays,
   })
+  if (error) throw error
+  return data
 }
 
 export async function updateAdverseEventStatus(id, status) {
